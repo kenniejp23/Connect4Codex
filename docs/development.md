@@ -2,7 +2,7 @@
 
 This project has two main parts:
 
-- `rust/`: Connect Four rules, MCTS, self-play, solver interface, and TUI exposed to Python through PyO3.
+- `cpp/`: C++20 Connect Four rules, MCTS, self-play, solver interface, TUI, and nanobind bindings.
 - `src/c4a0/`: PyTorch/PyTorch Lightning model, training loop, sweeps, and CLI commands.
 
 The CLI entrypoint is `src/c4a0/main.py`.
@@ -12,8 +12,8 @@ The CLI entrypoint is `src/c4a0/main.py`.
 Use [`mise`](https://mise.jdx.dev/) as the project entrypoint. `mise.toml` pins and bootstraps the required tools:
 
 - `uv` for Python dependency management
-- Rust stable, including `cargo`
-- `libclang` for Rust crates that use bindgen, including RocksDB bindings
+- CMake and Ninja for the C++ build
+- a C++20 compiler (GCC 13+ or Clang 18+ on the supported Linux target)
 
 Install mise once, then from the repo root run:
 
@@ -22,7 +22,8 @@ mise trust
 mise install
 ```
 
-`mise.toml` sets `LIBCLANG_PATH`/`LD_LIBRARY_PATH` using `scripts/find-libclang.py`. GitHub runners normally provide `/usr/lib/llvm-*/lib/libclang.so`; local machines can use a system LLVM/libclang or an existing mise LLVM install.
+The CMake build fetches pinned C++ dependencies and compiles SQLite into the extension. A C++20
+compiler, CMake, and Ninja are the only native build prerequisites.
 
 ## Common tasks
 
@@ -44,10 +45,14 @@ Run local validation:
 ```sh
 mise run lint
 mise run typecheck
-mise run test:rust
+mise run test:cpp
 mise run test:python
 mise run check
 ```
+
+The Linux TSan preset runs discovered tests through `setarch x86_64 -R`. Disabling ASLR for the
+test process avoids GCC TSan's documented early-runtime `unexpected memory mapping` failure on the
+supported Pop!_OS/Ubuntu hosts; it does not alter production builds.
 
 Run the full CI suite locally, including smoke training:
 
@@ -63,19 +68,19 @@ mise run ci
 
 ## Packaging/import check
 
-This is a mixed maturin Python/Rust package. After `mise run build`, both imports should work without `PYTHONPATH` hacks:
+This is a mixed scikit-build-core Python/C++ package. After `mise run build`, both imports should work without `PYTHONPATH` hacks:
 
 ```sh
 mise exec -- uv run python - <<'PY'
 import c4a0
-import c4a0_rust
+import c4a0_cpp
 
 print(c4a0.__file__)
-print(c4a0_rust.N_ROWS, c4a0_rust.N_COLS)
+print(c4a0_cpp.N_ROWS, c4a0_cpp.N_COLS)
 PY
 ```
 
-`c4a0_rust` is a Python package that re-exports the native `c4a0_rust._native` PyO3 extension.
+`c4a0_cpp` re-exports the native `c4a0_cpp._native` nanobind extension.
 
 ## CLI commands
 
@@ -246,17 +251,14 @@ Scores are cached in `solutions.db` by default.
 
 ## Verified checks
 
-Verified in this environment:
+The release gate covers:
 
-- `mise run build`: builds and installs the mixed Python/Rust package
+- `mise run build`: builds and installs the mixed Python/C++ package
 - `mise run lint`: Ruff passed
 - `mise run typecheck`: Pyright passed with 0 errors
-- `mise run test:rust`: 29 passed
-- `mise run test:python`: 4 passed
+- `mise run test:cpp`: runs native CTest unit and property tests
+- `mise run test:python`: Python API, training, tournament, and native-boundary tests
 - `mise run train:smoke`: runs end-to-end self-play + model training
 
-Current benign warnings observed:
-
-- `tool.uv.dev-dependencies` is deprecated; migrate to `dependency-groups.dev` later.
-- pytest-asyncio warns that `asyncio_default_fixture_loop_scope` is unset.
-- `Cannot read termcap database; using dumb terminal settings` can appear in non-interactive terminals.
+The terminal UI suite creates its own pseudo-terminal and verifies terminal restoration on both
+normal exit and evaluator failure.

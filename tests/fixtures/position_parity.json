@@ -1,0 +1,62 @@
+{
+  "format": "c4a0.position-fixtures",
+  "version": 1,
+  "positions": [
+    {
+      "moves": [],
+      "mask": 0,
+      "value": 0,
+      "terminal": null,
+      "legal_moves": [true, true, true, true, true, true, true]
+    },
+    {
+      "moves": [0],
+      "mask": 1,
+      "value": 0,
+      "terminal": null,
+      "legal_moves": [true, true, true, true, true, true, true]
+    },
+    {
+      "moves": [0, 1],
+      "mask": 3,
+      "value": 1,
+      "terminal": null,
+      "legal_moves": [true, true, true, true, true, true, true]
+    },
+    {
+      "moves": [0, 0, 1, 1, 2, 2, 3],
+      "mask": 911,
+      "value": 896,
+      "terminal": "opponent_win",
+      "legal_moves": [true, true, true, true, true, true, true]
+    },
+    {
+      "moves": [6, 0, 6, 0, 6, 0, 6],
+      "mask": 135291073,
+      "value": 16513,
+      "terminal": "opponent_win",
+      "legal_moves": [true, true, true, true, true, true, true]
+    },
+    {
+      "moves": [3, 2, 3, 2, 4],
+      "mask": 1564,
+      "value": 516,
+      "terminal": null,
+      "legal_moves": [true, true, true, true, true, true, true]
+    },
+    {
+      "moves": [2, 0, 0, 0, 0, 0, 0],
+      "mask": 34630287493,
+      "value": 268451841,
+      "terminal": null,
+      "legal_moves": [false, true, true, true, true, true, true]
+    },
+    {
+      "moves": [0, 0, 0, 0, 0, 0, 2, 1, 6, 6, 1, 6],
+      "mask": 34631344583,
+      "value": 268452165,
+      "terminal": null,
+      "legal_moves": [false, true, true, true, true, true, true]
+    }
+  ]
+}

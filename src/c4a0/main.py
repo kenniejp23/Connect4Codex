@@ -27,7 +27,7 @@ from c4a0.training import (  # noqa: E402
 )
 from c4a0.utils import get_torch_device  # noqa: E402
 
-import c4a0_rust  # noqa: E402
+import c4a0_cpp  # noqa: E402
 
 app = typer.Typer()
 
@@ -110,7 +110,7 @@ def play(
     else:
         raise ValueError(f"unrecognized model: {model}")
 
-    c4a0_rust.run_tui(  # type: ignore
+    c4a0_cpp.run_tui(  # type: ignore
         lambda model_id, x: nn.forward_numpy(x),
         max_mcts_iters,
         c_exploration,

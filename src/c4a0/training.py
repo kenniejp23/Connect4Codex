@@ -18,8 +18,8 @@ from torch.utils.data import DataLoader
 from c4a0.nn import ConnectFourNet, ModelConfig
 from c4a0.utils import BestModelCheckpoint
 
-import c4a0_rust  # type: ignore
-from c4a0_rust import PlayGamesResult, BUF_N_CHANNELS, N_COLS, N_ROWS, Sample  # type: ignore
+import c4a0_cpp  # type: ignore
+from c4a0_cpp import PlayGamesResult, BUF_N_CHANNELS, N_COLS, N_ROWS, Sample  # type: ignore
 
 
 class TrainingGen(BaseModel):
@@ -166,7 +166,7 @@ def train_single_gen(
 ) -> TrainingGen:
     """
     Trains a new generation from the given parent.
-    First generate games using c4a0_rust.play_games.
+    First generate games using c4a0_cpp.play_games.
     Then train a new model based on the parent model using the generated samples.
     Finally, save the resulting games and model in the training directory.
     """
@@ -178,8 +178,8 @@ def train_single_gen(
     # Self play
     model = parent.get_model(base_dir)
     model.to(device)
-    reqs = [c4a0_rust.GameMetadata(id, 0, 0) for id in range(n_self_play_games)]  # type: ignore
-    games = c4a0_rust.play_games(  # type: ignore
+    reqs = [c4a0_cpp.GameMetadata(id, 0, 0) for id in range(n_self_play_games)]  # type: ignore
+    games = c4a0_cpp.play_games(  # type: ignore
         reqs,
         self_play_batch_size,
         n_mcts_iterations,
@@ -207,10 +207,18 @@ def train_single_gen(
     train, test = games.split_train_test(0.8, 1337)  # type: ignore
     data_module = SampleDataModule(train, test, training_batch_size)
     best_model_cb = BestModelCheckpoint(monitor="val_loss", mode="min")
+    if device.type == "cuda":
+        accelerator = "gpu"
+        devices: int | list[int] = [device.index if device.index is not None else 0]
+    elif device.type in {"cpu", "mps"}:
+        accelerator = device.type
+        devices = 1
+    else:
+        raise ValueError(f"unsupported training device: {device}")
     trainer = pl.Trainer(
         max_epochs=100,
-        accelerator="auto",
-        devices="auto",
+        accelerator=accelerator,
+        devices=devices,
         callbacks=[
             best_model_cb,
             EarlyStopping(monitor="val_loss", patience=10, mode="min"),

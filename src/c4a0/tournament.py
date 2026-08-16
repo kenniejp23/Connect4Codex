@@ -15,8 +15,8 @@ from tabulate import tabulate
 import torch
 
 from c4a0.nn import ConnectFourNet
-import c4a0_rust  # type: ignore
-from c4a0_rust import N_COLS  # type: ignore
+import c4a0_cpp  # type: ignore
+from c4a0_cpp import N_COLS  # type: ignore
 
 PlayerName = NewType("PlayerName", str)
 
@@ -83,7 +83,7 @@ class TournamentResult:
 
     model_ids: List[ModelID]
     date: datetime = field(default_factory=datetime.now)
-    games: Optional[c4a0_rust.PlayGamesResult] = None
+    games: Optional[c4a0_cpp.PlayGamesResult] = None
 
     def get_scores(self) -> List[Tuple[ModelID, float]]:
         assert self.games is not None, "tournament has not been played"
@@ -126,10 +126,10 @@ def play_tournament(
     )
     player_ids = [player.model_id for player in players]
     pairings = list(itertools.permutations(player_ids, 2)) * int(games_per_match / 2)
-    reqs = [c4a0_rust.GameMetadata(id, p0, p1) for id, (p0, p1) in enumerate(pairings)]
+    reqs = [c4a0_cpp.GameMetadata(id, p0, p1) for id, (p0, p1) in enumerate(pairings)]
 
     logger.info(f"Beginning tournament with {len(players)} players")
-    tournament.games = c4a0_rust.play_games(
+    tournament.games = c4a0_cpp.play_games(
         reqs,
         batch_size,
         mcts_iterations,

@@ -5,6 +5,9 @@ __pycache__/
 .ruff_cache/
 .venv/
 .mise/
+build/
+work/
+CMakeUserPresets.json
 mise.local.toml
 mise.*.local.toml
 *.so

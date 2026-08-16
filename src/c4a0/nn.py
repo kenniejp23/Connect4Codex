@@ -10,7 +10,7 @@ import pytorch_lightning as pl
 from torch.optim.adam import Adam
 from einops import rearrange
 
-from c4a0_rust import N_COLS, N_ROWS  # type: ignore
+from c4a0_cpp import N_COLS, N_ROWS  # type: ignore
 
 
 class ModelConfig(BaseModel):

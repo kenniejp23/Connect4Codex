@@ -8,7 +8,6 @@
         "./src"
     ],
     "python.analysis.typeCheckingMode": "basic",
-    "rust-analyzer.linkedProjects": [
-        "rust/Cargo.toml"
-    ]
+    "cmake.configureOnOpen": false,
+    "cmake.useCMakePresets": "always"
 }

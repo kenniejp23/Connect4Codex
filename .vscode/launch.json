@@ -1,12 +1,13 @@
 {
   "configurations": [
     {
-      "name": "Python: src/main.py",
+      "name": "Python: c4a0 CLI",
       "type": "debugpy",
       "request": "launch",
-      "program": "rye run python src/main.py",
+      "program": "${workspaceFolder}/src/c4a0/main.py",
       "console": "integratedTerminal",
-      "justMyCode": true
+      "justMyCode": true,
+      "python": "${workspaceFolder}/.venv/bin/python"
     }
   ]
 }

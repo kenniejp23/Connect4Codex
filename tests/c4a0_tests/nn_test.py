@@ -3,7 +3,7 @@ import torch
 
 from c4a0.nn import ConnectFourNet, ModelConfig
 from c4a0.training import parse_lr_schedule
-from c4a0_rust import BUF_N_CHANNELS, N_COLS, N_ROWS
+from c4a0_cpp import BUF_N_CHANNELS, N_COLS, N_ROWS
 
 
 def make_model() -> ConnectFourNet:

@@ -1,7 +1,7 @@
 [project]
 name = "c4a0"
 version = "0.1.0"
-description = ""
+description = "AlphaZero-style Connect Four training and play with a C++20 engine"
 authors = [{ name = "Advait Shinde", email = "advait.shinde@gmail.com" }]
 dependencies = [
   "pytorch-lightning>=2.6.5",
@@ -15,7 +15,6 @@ dependencies = [
   "pydantic>=2.13.4",
   "tabulate>=0.10.0",
   "matplotlib>=3.11.0",
-  "maturin>=1.14.1",
   "loguru>=0.7.3",
   "typer>=0.26.8",
   "optuna>=4.9.0",
@@ -26,13 +25,38 @@ readme = "README.md"
 requires-python = ">= 3.11"
 
 [build-system]
-requires = ["maturin>=1.14.1,<2"]
-build-backend = "maturin"
+requires = [
+  "scikit-build-core==1.0.3",
+  "nanobind==2.15.0",
+]
+build-backend = "scikit_build_core.build"
 
-[tool.maturin]
-python-source = "src"
-python-packages = ["c4a0", "c4a0_rust"]
-module-name = "c4a0_rust._native"
+[tool.scikit-build]
+minimum-version = "build-system.requires"
+cmake.version = ">=3.28"
+ninja.version = ">=1.13"
+cmake.build-type = "Release"
+build-dir = "build/{wheel_tag}"
+wheel.packages = ["src/c4a0", "src/c4a0_cpp"]
+sdist.include = [
+  "CMakeLists.txt",
+  "CMakePresets.json",
+  "benchmarks/**",
+  "cpp/include/**",
+  "cpp/src/**",
+  "cpp/tests/**",
+  "scripts/check-wheel.sh",
+  "tests/fixtures/**",
+]
+sdist.exclude = [
+  "UPGRADE_LOG.md",
+  "claude-upgrade-progress.json",
+]
+
+[tool.scikit-build.cmake.define]
+C4A0_BUILD_PYTHON = "ON"
+C4A0_BUILD_TESTS = "OFF"
+C4A0_BUILD_BENCHMARKS = "OFF"
 
 [tool.uv]
 managed = true
@@ -46,11 +70,17 @@ dev = [
   "pandas>=3.0.3",
   "rankit>=0.3.3",
   "ruff>=0.15.20",
+  "ninja==1.13.0",
+  "clang-format==22.1.8",
 ]
 
 [tool.pyright]
 typeCheckingMode = "basic"
+include = ["src", "tests"]
+exclude = ["build", "work"]
 extraPaths = ["src", "tests"]
+venvPath = "."
+venv = ".venv"
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

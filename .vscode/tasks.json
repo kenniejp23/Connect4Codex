@@ -2,10 +2,10 @@
   "version": "2.0.0",
   "tasks": [
     {
-      "label": "Run Python Script",
+      "label": "Build C++ extension",
       "type": "shell",
-      "command": "rye",
-      "args": ["run", "python", "src/c4a0/main.py", "train"],
+      "command": "uv",
+      "args": ["sync", "--frozen", "--reinstall-package", "c4a0"],
       "group": {
         "kind": "build",
         "isDefault": true

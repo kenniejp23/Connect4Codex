@@ -20,3 +20,23 @@ jobs:
 
       - name: Run CI tasks
         run: mise run ci
+
+  native-sanitizers:
+    strategy:
+      fail-fast: false
+      matrix:
+        task: ["test:sanitize", "test:thread"]
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools with mise
+        uses: jdx/mise-action@v3
+        with:
+          version: 2026.1.6
+          install: true
+          cache: true
+
+      - name: Run native sanitizer suite
+        run: mise run ${{ matrix.task }}

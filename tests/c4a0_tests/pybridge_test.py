@@ -1,7 +1,7 @@
 import numpy as np
 
-import c4a0_rust
-from c4a0_rust import N_COLS
+import c4a0_cpp
+from c4a0_cpp import N_COLS
 
 
 def _uniform_eval(_model_id, pos):
@@ -20,8 +20,8 @@ def _sample_positions(samples):
 
 
 def test_split_train_test_is_deterministic_and_non_mutating():
-    games = c4a0_rust.play_games(
-        [c4a0_rust.GameMetadata(i, 0, 0) for i in range(4)],
+    games = c4a0_cpp.play_games(
+        [c4a0_cpp.GameMetadata(i, 0, 0) for i in range(4)],
         8,
         2,
         1.4,
