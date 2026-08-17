@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 
+from enum import Enum
 from pathlib import Path
 import sys
 
@@ -30,6 +31,23 @@ from c4a0.utils import get_torch_device  # noqa: E402
 import c4a0_cpp  # noqa: E402
 
 app = typer.Typer()
+
+
+class GameMode(str, Enum):
+    human_ai = "human-ai"
+    human_human = "human-human"
+    ai_ai = "ai-ai"
+
+
+class HumanSide(str, Enum):
+    red = "red"
+    blue = "blue"
+
+
+class PlayModel(str, Enum):
+    best = "best"
+    random = "random"
+    uniform = "uniform"
 
 
 @app.command()
@@ -97,24 +115,41 @@ def play(
     max_mcts_iters: int = 1400,
     c_exploration: float = 6.6,
     c_ply_penalty: float = 0.01,
-    model: str = "best",
+    model: PlayModel = PlayModel.best,
+    mode: GameMode = GameMode.human_ai,
+    human_side: HumanSide = HumanSide.red,
 ):
-    """Play interactive games"""
+    """Play against the AI, another human, or watch an AI-vs-AI game."""
     gen = TrainingGen.load_latest(base_dir)
-    if model == "best":
+    if model is PlayModel.best:
         nn = gen.get_model(base_dir)
-    elif model == "random":
+        nn.eval()
+    elif model is PlayModel.random:
         nn = RandomPlayer(ModelID(0))
-    elif model == "uniform":
+    elif model is PlayModel.uniform:
         nn = UniformPlayer(ModelID(0))
     else:
         raise ValueError(f"unrecognized model: {model}")
+
+    if mode is GameMode.human_ai:
+        auto_red = human_side is HumanSide.blue
+        auto_blue = human_side is HumanSide.red
+    elif mode is GameMode.human_human:
+        auto_red = False
+        auto_blue = False
+    elif mode is GameMode.ai_ai:
+        auto_red = True
+        auto_blue = True
+    else:
+        raise ValueError(f"unrecognized game mode: {mode}")
 
     c4a0_cpp.run_tui(  # type: ignore
         lambda model_id, x: nn.forward_numpy(x),
         max_mcts_iters,
         c_exploration,
         c_ply_penalty,
+        auto_red,
+        auto_blue,
     )
 
 

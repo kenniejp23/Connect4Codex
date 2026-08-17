@@ -202,6 +202,16 @@ TEST_CASE("interactive search reaches its target and snapshots player zero") {
   CHECK_FALSE(play.make_move(kCols));
 }
 
+TEST_CASE("interactive play automatically selects a best move when search is ready") {
+  RecordingUniformEvaluator evaluator(1);
+  InteractivePlay play(evaluator, 3, 1.0F, 0.01F);
+
+  const auto searched = wait_until_search_finishes(play);
+  CHECK(searched.pos.ply() == 0);
+  REQUIRE(play.make_best_move_if_ready());
+  CHECK(play.snapshot().pos.ply() == 1);
+}
+
 TEST_CASE("interactive search preserves and rethrows background errors") {
   ThrowingEvaluator evaluator;
   InteractivePlay play(evaluator, 1, 1.0F, 0.01F);

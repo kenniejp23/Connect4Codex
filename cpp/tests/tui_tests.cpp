@@ -93,7 +93,7 @@ struct TuiRunResult {
   }
 
   winsize terminal_size{};
-  terminal_size.ws_row = 45;
+  terminal_size.ws_row = 50;
   terminal_size.ws_col = 120;
   if (::ioctl(master.get(), TIOCSWINSZ, &terminal_size) != 0) {
     throw std::runtime_error("failed to size pseudo-terminal");
@@ -210,6 +210,8 @@ TEST_CASE("TUI accepts Q in a pseudo-terminal and restores terminal mode", "[tui
   CHECK(result.output.find("c4a0") != std::string::npos);
   CHECK(result.output.find("Policy") != std::string::npos);
   CHECK(result.output.find("Instructions") != std::string::npos);
+  CHECK(result.output.find("Red (Human)") != std::string::npos);
+  CHECK(result.output.find("Blue (Human)") != std::string::npos);
 }
 
 TEST_CASE("TUI restores terminal mode when background evaluation throws", "[tui]") {

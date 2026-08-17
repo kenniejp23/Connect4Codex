@@ -45,6 +45,23 @@ uv run src/c4a0/main.py train --max-gens=10
 uv run src/c4a0/main.py play --model=best
 ```
 
+The default game mode is human-versus-AI: the human plays Red and moves first. Choose a column
+with keys `1` through `7`; after the MCTS search reaches its configured iteration limit, Blue
+makes its move automatically. The TUI labels both colors as Human or AI.
+
+Use `--human-side blue` to let the AI move first, `--mode human-human` for local two-player play,
+or `--mode ai-ai` to watch the selected model play both colors:
+
+```sh
+uv run src/c4a0/main.py play --model best --mode human-ai --human-side blue
+uv run src/c4a0/main.py play --model best --mode human-human
+uv run src/c4a0/main.py play --model best --mode ai-ai
+```
+
+`--model` selects the evaluator used by MCTS: `best` loads the latest trained network, `random`
+uses random policy logits, and `uniform` gives every legal move equal policy weight. `B` plays the
+current best searched move immediately, while `R` samples a move from the current search policy.
+
 6. (Optional) Download a [connect four solver](https://github.com/PascalPons/connect4?ts=2) to
    objectively measure training progress:
 

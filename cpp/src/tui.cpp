@@ -93,7 +93,13 @@ struct TurnStatus {
   Color color;
 };
 
-[[nodiscard]] TurnStatus turn_status(const Position& position) {
+[[nodiscard]] std::string player_name(bool red, bool auto_red, bool auto_blue) {
+  const bool automatic = red ? auto_red : auto_blue;
+  return std::string(red ? "Red" : "Blue") + (automatic ? " (AI)" : " (Human)");
+}
+
+[[nodiscard]] TurnStatus turn_status(const Position& position, bool auto_red,
+                                     bool auto_blue) {
   const auto terminal = position.terminal_state();
   if (terminal == TerminalState::kDraw) {
     return {"Draw", Color::GrayDark};
@@ -105,8 +111,9 @@ struct TurnStatus {
     return position.ply() % 2 == 0 ? TurnStatus{"Blue won", Color::Blue}
                                    : TurnStatus{"Red won", Color::Red};
   }
-  return position.ply() % 2 == 0 ? TurnStatus{"Red to play", Color::Red}
-                                 : TurnStatus{"Blue to play", Color::Blue};
+  const bool red = position.ply() % 2 == 0;
+  return {player_name(red, auto_red, auto_blue) + " to play",
+          red ? Color::Red : Color::Blue};
 }
 
 [[nodiscard]] Element evaluation_bar(std::string label, float value,
@@ -167,11 +174,12 @@ struct TurnStatus {
                text(std::move(description))});
 }
 
-[[nodiscard]] Element instructions() {
+[[nodiscard]] Element instructions(bool has_automatic_player) {
   return window(text(" Instructions ") | bold,
                 hbox({
                     vbox({
-                        instruction("1-7", "Play move"),
+                        instruction("1-7", has_automatic_player ? "Play human move"
+                                                                : "Play move"),
                         instruction("B", "Play best move"),
                         instruction("R", "Play random move"),
                         instruction("M", "Add 100 MCTS iterations"),
@@ -186,8 +194,9 @@ struct TurnStatus {
                 }));
 }
 
-[[nodiscard]] Element render_app(const Snapshot& snapshot) {
-  const TurnStatus status = turn_status(snapshot.pos);
+[[nodiscard]] Element render_app(const Snapshot& snapshot, bool auto_red,
+                                 bool auto_blue) {
+  const TurnStatus status = turn_status(snapshot.pos, auto_red, auto_blue);
   const Element game =
       window(text(" Game - " + status.text + " ") | color(status.color) | bold,
              board(snapshot.pos) | center);
@@ -199,7 +208,10 @@ struct TurnStatus {
              text(" c4a0 - Connect Four AlphaZero ") | center | bold,
              hbox({game | flex, evaluations(snapshot) | size(WIDTH, EQUAL, 32)}),
              policy_chart(snapshot) | flex,
-             instructions(),
+             instructions(auto_red || auto_blue),
+             text(player_name(true, auto_red, auto_blue) + "  vs  " +
+                  player_name(false, auto_red, auto_blue)) |
+                 center | bold,
              text(parameters) | center | color(Color::White),
          }) |
          border;
@@ -209,8 +221,14 @@ struct TurnStatus {
   return event == Event::Character(lower) || event == Event::Character(upper);
 }
 
+[[nodiscard]] bool is_automatic_turn(const Snapshot& snapshot, bool auto_red,
+                                     bool auto_blue) {
+  return snapshot.pos.ply() % 2 == 0 ? auto_red : auto_blue;
+}
+
 [[nodiscard]] bool handle_event(const Event& event, InteractivePlay& game,
-                                ScreenInteractive& screen) {
+                                ScreenInteractive& screen, bool auto_red,
+                                bool auto_blue) {
   if (is_character(event, 'q', 'Q')) {
     screen.ExitLoopClosure()();
     return true;
@@ -239,30 +257,42 @@ struct TurnStatus {
     game.reset();
     return true;
   }
+  if (event == Event::Custom) {
+    const Snapshot snapshot = game.snapshot();
+    if (!snapshot.pos.terminal_state().has_value() &&
+        is_automatic_turn(snapshot, auto_red, auto_blue)) {
+      static_cast<void>(game.make_best_move_if_ready());
+    }
+    return true;
+  }
   for (std::size_t column = 0; column < kCols; ++column) {
     if (event == Event::Character(static_cast<char>('1' + column))) {
-      static_cast<void>(game.make_move(column));
+      const Snapshot snapshot = game.snapshot();
+      if (!is_automatic_turn(snapshot, auto_red, auto_blue)) {
+        static_cast<void>(game.make_move(column));
+      }
       return true;
     }
   }
-  return event == Event::Custom;
+  return false;
 }
 
 }  // namespace
 
 void run_tui(Evaluator& evaluator, std::size_t max_mcts_iterations, float c_exploration,
-             float c_ply_penalty) {
+             float c_ply_penalty, bool auto_red, bool auto_blue) {
   InteractivePlay game(evaluator, max_mcts_iterations, c_exploration, c_ply_penalty);
   auto screen = ScreenInteractive::Fullscreen();
 
-  auto renderer = ftxui::Renderer([&game] {
+  auto renderer = ftxui::Renderer([&game, auto_red, auto_blue] {
     game.rethrow_background_error();
-    return render_app(game.snapshot());
+    return render_app(game.snapshot(), auto_red, auto_blue);
   });
-  auto component = ftxui::CatchEvent(renderer, [&game, &screen](const Event& event) {
-    game.rethrow_background_error();
-    return handle_event(event, game, screen);
-  });
+  auto component = ftxui::CatchEvent(
+      renderer, [&game, &screen, auto_red, auto_blue](const Event& event) {
+        game.rethrow_background_error();
+        return handle_event(event, game, screen, auto_red, auto_blue);
+      });
 
   // FTXUI redraws in response to events. A small custom-event heartbeat keeps
   // the live MCTS counters, policies and any background exception visible

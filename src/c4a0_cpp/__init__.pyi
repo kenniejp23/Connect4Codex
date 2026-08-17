@@ -73,4 +73,6 @@ def run_tui(
     max_mcts_iters: int,
     c_exploration: float,
     c_ply_penalty: float,
+    auto_red: bool = False,
+    auto_blue: bool = False,
 ) -> None: ...

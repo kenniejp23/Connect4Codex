@@ -30,6 +30,7 @@ class InteractivePlay {
   void increase_mcts_iterations(std::size_t count);
   [[nodiscard]] bool make_move(Move move);
   [[nodiscard]] bool make_random_move(float temperature);
+  [[nodiscard]] bool make_best_move_if_ready();
   void reset();
   [[nodiscard]] bool undo();
   void rethrow_background_error();

@@ -285,11 +285,13 @@ NB_MODULE(_native, module) {
   module.def(
       "run_tui",
       [](nb::object callback, std::size_t max_mcts_iterations, float c_exploration,
-         float c_ply_penalty) {
+         float c_ply_penalty, bool auto_red, bool auto_blue) {
         validate_engine_arguments(1, max_mcts_iterations, c_exploration, c_ply_penalty);
         PythonEvaluator evaluator(std::move(callback));
         nb::gil_scoped_release release;
-        run_tui(evaluator, max_mcts_iterations, c_exploration, c_ply_penalty);
+        run_tui(evaluator, max_mcts_iterations, c_exploration, c_ply_penalty, auto_red,
+                auto_blue);
       },
-      "py_eval_pos_cb"_a, "max_mcts_iters"_a, "c_exploration"_a, "c_ply_penalty"_a);
+      "py_eval_pos_cb"_a, "max_mcts_iters"_a, "c_exploration"_a, "c_ply_penalty"_a,
+      "auto_red"_a = false, "auto_blue"_a = false);
 }

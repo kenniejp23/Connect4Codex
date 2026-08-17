@@ -237,6 +237,19 @@ bool InteractivePlay::make_random_move(float temperature) {
   return true;
 }
 
+bool InteractivePlay::make_best_move_if_ready() {
+  std::lock_guard lock(impl_->mutex);
+  impl_->throw_background_error_locked();
+  if (impl_->game.root_position().terminal_state().has_value() ||
+      impl_->game.root_visit_count() < impl_->max_mcts_iterations) {
+    return false;
+  }
+
+  impl_->game.make_random_move(impl_->c_exploration, 0.0F);
+  impl_->signal_search_locked();
+  return true;
+}
+
 void InteractivePlay::reset() {
   std::lock_guard lock(impl_->mutex);
   impl_->throw_background_error_locked();
