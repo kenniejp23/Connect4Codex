@@ -134,3 +134,8 @@ uv run python src/c4a0/main.py train \
   --l2-reg 0 \
   --max-gens 1
 '''
+
+[tasks.gui]
+description = "Launch the native PySide6 desktop application"
+depends = ["build"]
+run = "uv run c4a0 gui"

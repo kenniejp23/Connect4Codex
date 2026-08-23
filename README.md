@@ -33,13 +33,25 @@ mise run build
 mise run check
 ```
 
-4. Train a network:
+4. Launch the native desktop application:
+
+```sh
+mise run gui
+# or, after installation
+uv run c4a0 gui
+```
+
+The desktop UI provides mouse and keyboard play, live MCTS analysis, training and sweep
+configuration, model/data inspection, tournaments, solver scoring, and developer validation. The
+existing terminal commands remain available.
+
+5. Train a network:
 
 ```sh
 uv run src/c4a0/main.py train --max-gens=10
 ```
 
-5. Play against the network:
+6. Play against the network:
 
 ```sh
 uv run src/c4a0/main.py play --model=best
@@ -62,7 +74,7 @@ uv run src/c4a0/main.py play --model best --mode ai-ai
 uses random policy logits, and `uniform` gives every legal move equal policy weight. `B` plays the
 current best searched move immediately, while `R` samples a move from the current search policy.
 
-6. (Optional) Download a [connect four solver](https://github.com/PascalPons/connect4?ts=2) to
+7. (Optional) Download a [connect four solver](https://github.com/PascalPons/connect4?ts=2) to
    objectively measure training progress:
 
 ```sh

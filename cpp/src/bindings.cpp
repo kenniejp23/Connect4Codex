@@ -1,3 +1,4 @@
+#include "c4a0/interactive.hpp"
 #include "c4a0/position.hpp"
 #include "c4a0/self_play.hpp"
 #include "c4a0/serialization.hpp"
@@ -137,6 +138,173 @@ class PythonEvaluator final : public Evaluator {
   nb::object callback_;
 };
 
+struct PythonGameSnapshot {
+  std::vector<std::vector<std::uint8_t>> board;
+  std::array<bool, kCols> legal_moves{};
+  std::string side_to_move;
+  std::string terminal_state;
+  std::vector<std::pair<std::size_t, std::size_t>> winning_cells;
+  std::vector<Move> move_history;
+  Policy policy{};
+  QValue q_penalty{};
+  QValue q_no_penalty{};
+  std::size_t n_mcts_iterations{};
+  std::size_t max_mcts_iterations{};
+  float c_exploration{};
+  float c_ply_penalty{};
+  bool background_running{};
+};
+
+[[nodiscard]] std::vector<std::pair<std::size_t, std::size_t>> winning_cells(
+    const std::vector<std::vector<std::uint8_t>>& board, std::uint8_t winner) {
+  constexpr std::array<std::pair<int, int>, 4> directions = {
+      std::pair{0, 1}, std::pair{1, 0}, std::pair{1, 1}, std::pair{1, -1}};
+  for (std::size_t row = 0; row < kRows; ++row) {
+    for (std::size_t col = 0; col < kCols; ++col) {
+      if (board[row][col] != winner) {
+        continue;
+      }
+      for (const auto& [row_step, col_step] : directions) {
+        std::vector<std::pair<std::size_t, std::size_t>> cells;
+        cells.reserve(4);
+        for (int offset = 0; offset < 4; ++offset) {
+          const int candidate_row = static_cast<int>(row) + row_step * offset;
+          const int candidate_col = static_cast<int>(col) + col_step * offset;
+          if (candidate_row < 0 || candidate_row >= static_cast<int>(kRows) ||
+              candidate_col < 0 || candidate_col >= static_cast<int>(kCols) ||
+              board[static_cast<std::size_t>(candidate_row)]
+                   [static_cast<std::size_t>(candidate_col)] != winner) {
+            cells.clear();
+            break;
+          }
+          cells.emplace_back(static_cast<std::size_t>(candidate_row),
+                             static_cast<std::size_t>(candidate_col));
+        }
+        if (cells.size() == 4) {
+          return cells;
+        }
+      }
+    }
+  }
+  return {};
+}
+
+[[nodiscard]] PythonGameSnapshot to_python_snapshot(const Snapshot& snapshot) {
+  PythonGameSnapshot result;
+  result.board.assign(kRows, std::vector<std::uint8_t>(kCols, 0));
+  for (std::size_t visible_row = 0; visible_row < kRows; ++visible_row) {
+    const std::size_t position_row = kRows - visible_row - 1;
+    for (std::size_t col = 0; col < kCols; ++col) {
+      const auto cell = snapshot.pos.get(position_row, col);
+      if (cell == CellValue::kPlayer) {
+        result.board[visible_row][col] = 1;
+      } else if (cell == CellValue::kOpponent) {
+        result.board[visible_row][col] = 2;
+      }
+    }
+  }
+
+  result.legal_moves = snapshot.pos.legal_moves();
+  result.side_to_move = snapshot.pos.ply() % 2 == 0 ? "red" : "gold";
+  const auto terminal = snapshot.pos.terminal_state();
+  if (!terminal.has_value()) {
+    result.terminal_state = "ongoing";
+  } else if (*terminal == TerminalState::kDraw) {
+    result.terminal_state = "draw";
+  } else {
+    result.terminal_state = snapshot.pos.ply() % 2 == 0 ? "gold_win" : "red_win";
+    result.winning_cells = winning_cells(
+        result.board,
+        result.terminal_state == "red_win" ? std::uint8_t{1} : std::uint8_t{2});
+  }
+  result.move_history = snapshot.moves;
+  result.policy = snapshot.policy;
+  result.q_penalty = snapshot.q_penalty;
+  result.q_no_penalty = snapshot.q_no_penalty;
+  result.n_mcts_iterations = snapshot.n_mcts_iterations;
+  result.max_mcts_iterations = snapshot.max_mcts_iterations;
+  result.c_exploration = snapshot.c_exploration;
+  result.c_ply_penalty = snapshot.c_ply_penalty;
+  result.background_running = snapshot.background_running;
+  return result;
+}
+
+class PythonInteractivePlay {
+ public:
+  PythonInteractivePlay(nb::object callback, std::size_t max_mcts_iterations,
+                        float c_exploration, float c_ply_penalty, ModelId red_model_id,
+                        ModelId gold_model_id)
+      : evaluator_(std::make_unique<PythonEvaluator>(std::move(callback))),
+        game_(std::make_unique<InteractivePlay>(
+            *evaluator_, max_mcts_iterations, c_exploration, c_ply_penalty, Position{},
+            GameMetadata{.game_id = 0,
+                         .player0_id = red_model_id,
+                         .player1_id = gold_model_id})) {}
+
+  ~PythonInteractivePlay() {
+    if (game_) {
+      nb::gil_scoped_release release;
+      game_.reset();
+    }
+  }
+
+  PythonInteractivePlay(const PythonInteractivePlay&) = delete;
+  PythonInteractivePlay& operator=(const PythonInteractivePlay&) = delete;
+
+  [[nodiscard]] PythonGameSnapshot snapshot() {
+    require_open();
+    game_->rethrow_background_error();
+    return to_python_snapshot(game_->snapshot());
+  }
+
+  [[nodiscard]] bool make_move(Move move) {
+    require_open();
+    return game_->make_move(move);
+  }
+
+  [[nodiscard]] bool make_best_move() {
+    require_open();
+    return game_->make_random_move(0.0F);
+  }
+
+  [[nodiscard]] bool make_best_move_if_ready() {
+    require_open();
+    return game_->make_best_move_if_ready();
+  }
+
+  [[nodiscard]] bool make_random_move(float temperature) {
+    require_open();
+    return game_->make_random_move(temperature);
+  }
+
+  void increase_mcts_iterations(std::size_t count) {
+    require_open();
+    game_->increase_mcts_iterations(count);
+  }
+
+  [[nodiscard]] bool undo() {
+    require_open();
+    return game_->undo();
+  }
+
+  void reset() {
+    require_open();
+    game_->reset();
+  }
+
+  void close() { game_.reset(); }
+
+ private:
+  void require_open() const {
+    if (!game_) {
+      throw std::runtime_error("interactive game is closed");
+    }
+  }
+
+  std::unique_ptr<PythonEvaluator> evaluator_;
+  std::unique_ptr<InteractivePlay> game_;
+};
+
 nb::tuple sample_to_numpy(const Sample& sample) {
   const auto position_buffer = sample.pos.to_buffer();
   auto position =
@@ -191,6 +359,51 @@ NB_MODULE(_native, module) {
   module.attr("N_ROWS") = kRows;
   module.attr("N_COLS") = kCols;
   module.attr("BUF_N_CHANNELS") = kBufferChannels;
+
+  auto game_snapshot =
+      nb::class_<PythonGameSnapshot>(module, "GameSnapshot")
+          .def_ro("board", &PythonGameSnapshot::board)
+          .def_ro("legal_moves", &PythonGameSnapshot::legal_moves)
+          .def_ro("side_to_move", &PythonGameSnapshot::side_to_move)
+          .def_ro("terminal_state", &PythonGameSnapshot::terminal_state)
+          .def_ro("winning_cells", &PythonGameSnapshot::winning_cells)
+          .def_ro("move_history", &PythonGameSnapshot::move_history)
+          .def_ro("policy", &PythonGameSnapshot::policy)
+          .def_ro("q_penalty", &PythonGameSnapshot::q_penalty)
+          .def_ro("q_no_penalty", &PythonGameSnapshot::q_no_penalty)
+          .def_ro("n_mcts_iterations", &PythonGameSnapshot::n_mcts_iterations)
+          .def_ro("max_mcts_iterations", &PythonGameSnapshot::max_mcts_iterations)
+          .def_ro("c_exploration", &PythonGameSnapshot::c_exploration)
+          .def_ro("c_ply_penalty", &PythonGameSnapshot::c_ply_penalty)
+          .def_ro("background_running", &PythonGameSnapshot::background_running);
+  game_snapshot.attr("__module__") = "c4a0_cpp";
+
+  auto interactive_play =
+      nb::class_<PythonInteractivePlay>(module, "InteractivePlay")
+          .def(nb::init<nb::object, std::size_t, float, float, ModelId, ModelId>(),
+               "py_eval_pos_cb"_a, "max_mcts_iters"_a, "c_exploration"_a,
+               "c_ply_penalty"_a, "red_model_id"_a = 0, "gold_model_id"_a = 0)
+          .def("snapshot", &PythonInteractivePlay::snapshot,
+               nb::call_guard<nb::gil_scoped_release>())
+          .def("make_move", &PythonInteractivePlay::make_move, "column"_a,
+               nb::call_guard<nb::gil_scoped_release>())
+          .def("make_best_move", &PythonInteractivePlay::make_best_move,
+               nb::call_guard<nb::gil_scoped_release>())
+          .def("make_best_move_if_ready",
+               &PythonInteractivePlay::make_best_move_if_ready,
+               nb::call_guard<nb::gil_scoped_release>())
+          .def("make_random_move", &PythonInteractivePlay::make_random_move,
+               "temperature"_a = 1.0F, nb::call_guard<nb::gil_scoped_release>())
+          .def("increase_mcts_iterations",
+               &PythonInteractivePlay::increase_mcts_iterations, "count"_a,
+               nb::call_guard<nb::gil_scoped_release>())
+          .def("undo", &PythonInteractivePlay::undo,
+               nb::call_guard<nb::gil_scoped_release>())
+          .def("reset", &PythonInteractivePlay::reset,
+               nb::call_guard<nb::gil_scoped_release>())
+          .def("close", &PythonInteractivePlay::close,
+               nb::call_guard<nb::gil_scoped_release>());
+  interactive_play.attr("__module__") = "c4a0_cpp";
 
   auto metadata = nb::class_<GameMetadata>(module, "GameMetadata")
                       .def(nb::init<std::uint64_t, ModelId, ModelId>(), "game_id"_a,
@@ -264,23 +477,41 @@ NB_MODULE(_native, module) {
       "play_games",
       [](const std::vector<GameMetadata>& requests, std::size_t max_nn_batch_size,
          std::size_t n_mcts_iterations, float c_exploration, float c_ply_penalty,
-         nb::object callback) {
+         nb::object callback, nb::object progress_callback,
+         nb::object cancelled_callback) {
         if (requests.empty()) {
           return PlayGamesResult{};
         }
         validate_engine_arguments(max_nn_batch_size, n_mcts_iterations, c_exploration,
                                   c_ply_penalty);
         PythonEvaluator evaluator(std::move(callback));
+        SelfPlayProgressCallback progress;
+        if (!progress_callback.is_none()) {
+          progress = [callback = std::move(progress_callback)](std::size_t completed,
+                                                               std::size_t total) {
+            nb::gil_scoped_acquire acquire;
+            callback(completed, total);
+          };
+        }
+        CancellationCallback cancelled;
+        if (!cancelled_callback.is_none()) {
+          cancelled = [callback = std::move(cancelled_callback)] {
+            nb::gil_scoped_acquire acquire;
+            return nb::cast<bool>(callback());
+          };
+        }
         std::vector<GameResult> results;
         {
           nb::gil_scoped_release release;
           results = self_play(evaluator, requests, max_nn_batch_size, n_mcts_iterations,
-                              c_exploration, c_ply_penalty);
+                              c_exploration, c_ply_penalty, std::move(progress),
+                              std::move(cancelled));
         }
         return PlayGamesResult{.results = std::move(results)};
       },
       "reqs"_a, "max_nn_batch_size"_a, "n_mcts_iterations"_a, "c_exploration"_a,
-      "c_ply_penalty"_a, "py_eval_pos_cb"_a);
+      "c_ply_penalty"_a, "py_eval_pos_cb"_a, "progress_callback"_a = nb::none(),
+      "cancelled_callback"_a = nb::none());
 
   module.def(
       "run_tui",

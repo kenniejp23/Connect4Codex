@@ -1,9 +1,11 @@
 import pickle
+from datetime import datetime
+from typing import cast
 
 import pytest
 import torch
 
-from c4a0.nn import ModelConfig
+from c4a0.nn import ConnectFourNet, ModelConfig
 from c4a0.training import (
     SampleDataModule,
     TrainingGen,
@@ -59,8 +61,11 @@ def test_training_loop_saves_trained_best_model_and_matching_metadata(tmp_path):
         self_play_batch_size=16,
         training_batch_size=10_000,
         model_config=model_config,
-        max_gens=1,
+        max_gens=2,
+        should_stop_after_generation=lambda: True,
     )
+
+    assert gen.gen_n == 1
 
     parent = TrainingGen.load(str(tmp_path), gen.parent)  # type: ignore[arg-type]
     parent_model = parent.get_model(str(tmp_path))
@@ -80,3 +85,41 @@ def test_training_loop_saves_trained_best_model_and_matching_metadata(tmp_path):
     with open(gen.gen_folder(str(tmp_path)) + "/model.pkl", "rb") as f:
         pickled_model = pickle.load(f)
     assert _sum_abs_model_diff(saved_model, pickled_model) == pytest.approx(0.0)
+
+
+def test_generation_publication_is_atomic_and_loader_ignores_work_dirs(tmp_path):
+    model_config = ModelConfig(
+        n_residual_blocks=0,
+        conv_filter_size=4,
+        n_policy_layers=1,
+        n_value_layers=1,
+        lr_schedule={0: 1e-3},
+        l2_reg=0.0,
+    )
+    generation = TrainingGen(
+        created_at=datetime.now(),
+        gen_n=0,
+        n_mcts_iterations=1,
+        c_exploration=1.0,
+        c_ply_penalty=0.01,
+        self_play_batch_size=1,
+        training_batch_size=1,
+        network_config=model_config,
+    )
+
+    class Unpickleable:
+        def __reduce__(self):
+            raise pickle.PicklingError("fixture failure")
+
+    unpickleable_model = cast(ConnectFourNet, Unpickleable())
+    with pytest.raises(pickle.PicklingError):
+        generation.save_all(str(tmp_path), None, unpickleable_model)
+    assert not (tmp_path / generation.created_at.isoformat()).exists()
+    assert not list(tmp_path.glob("*.staging"))
+
+    generation.save_all(str(tmp_path), None, ConnectFourNet(model_config))
+    (tmp_path / "lightning_logs").mkdir()
+    incomplete = tmp_path / ".interrupted.staging"
+    incomplete.mkdir()
+    (incomplete / "metadata.json").write_text("{}")
+    assert [item.gen_n for item in TrainingGen.load_all(str(tmp_path))] == [0]

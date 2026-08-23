@@ -43,9 +43,9 @@ void validate_evaluation(const Position& position, const EvalPosResult& evaluati
 
 struct InteractivePlay::Impl {
   Impl(Evaluator& evaluator_value, std::size_t max_iterations, float exploration,
-       float ply_penalty, Position position)
+       float ply_penalty, Position position, GameMetadata metadata)
       : evaluator(evaluator_value),
-        game(std::move(position), GameMetadata{}),
+        game(std::move(position), metadata),
         max_mcts_iterations(max_iterations),
         c_exploration(exploration),
         c_ply_penalty(ply_penalty) {
@@ -165,9 +165,9 @@ struct InteractivePlay::Impl {
 
 InteractivePlay::InteractivePlay(Evaluator& evaluator, std::size_t max_mcts_iterations,
                                  float c_exploration, float c_ply_penalty,
-                                 Position position)
+                                 Position position, GameMetadata metadata)
     : impl_(std::make_unique<Impl>(evaluator, max_mcts_iterations, c_exploration,
-                                   c_ply_penalty, std::move(position))) {}
+                                   c_ply_penalty, std::move(position), metadata)) {}
 
 InteractivePlay::~InteractivePlay() = default;
 
@@ -192,6 +192,7 @@ Snapshot InteractivePlay::snapshot() const {
       .c_exploration = impl_->c_exploration,
       .c_ply_penalty = impl_->c_ply_penalty,
       .background_running = impl_->background_running,
+      .moves = impl_->game.move_history(),
   };
 }
 

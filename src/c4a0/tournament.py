@@ -116,6 +116,8 @@ def play_tournament(
     mcts_iterations: int,
     exploration_constant: float,
     c_ply_penalty: float = 0.01,
+    progress_callback: Optional[Callable[[int, int], None]] = None,
+    cancelled_callback: Optional[Callable[[], bool]] = None,
 ) -> TournamentResult:
     """Plays a round-robin tournament, returning the total score of each player."""
     assert games_per_match % 2 == 0, "games_per_match must be even"
@@ -136,6 +138,8 @@ def play_tournament(
         exploration_constant,
         c_ply_penalty,
         lambda player_id, pos: gen_id_to_player[ModelID(player_id)].forward_numpy(pos),
+        progress_callback,
+        cancelled_callback,
     )
     logger.info(f"Finished tournament with {len(tournament.games.results)} games")
 

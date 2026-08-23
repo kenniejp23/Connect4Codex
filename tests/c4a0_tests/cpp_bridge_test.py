@@ -38,7 +38,9 @@ def test_public_api_and_numpy_contract():
         "N_COLS",
         "N_ROWS",
         "GameMetadata",
+        "GameSnapshot",
         "GameResult",
+        "InteractivePlay",
         "PlayGamesResult",
         "Sample",
         "play_games",
@@ -52,8 +54,10 @@ def test_public_api_and_numpy_contract():
         2,
     )
     assert c4a0_cpp.GameMetadata.__module__ == "c4a0_cpp"
+    assert c4a0_cpp.GameSnapshot.__module__ == "c4a0_cpp"
     assert c4a0_cpp.Sample.__module__ == "c4a0_cpp"
     assert c4a0_cpp.GameResult.__module__ == "c4a0_cpp"
+    assert c4a0_cpp.InteractivePlay.__module__ == "c4a0_cpp"
     assert c4a0_cpp.PlayGamesResult.__module__ == "c4a0_cpp"
 
     games = _small_games()
@@ -84,6 +88,101 @@ def test_public_api_and_numpy_contract():
             setattr(metadata, field, 99)
 
 
+def test_interactive_play_exposes_absolute_board_and_result():
+    game = c4a0_cpp.InteractivePlay(_uniform_eval, 1, 1.0, 0.01, 3, 7)
+    try:
+        # Red wins horizontally while Gold is stacked above the first columns.
+        for column in [0, 0, 1, 1, 2, 2, 3]:
+            assert game.make_move(column)
+
+        snapshot = game.snapshot()
+        assert snapshot.terminal_state == "red_win"
+        assert snapshot.side_to_move == "gold"
+        assert snapshot.move_history == [0, 0, 1, 1, 2, 2, 3]
+        assert snapshot.board[-1] == [1, 1, 1, 1, 0, 0, 0]
+        assert snapshot.board[-2] == [2, 2, 2, 0, 0, 0, 0]
+        assert snapshot.winning_cells == [(5, 0), (5, 1), (5, 2), (5, 3)]
+
+        assert game.undo()
+        assert game.snapshot().terminal_state == "ongoing"
+        game.reset()
+        assert game.snapshot().move_history == []
+    finally:
+        game.close()
+
+
+@pytest.mark.parametrize(
+    ("moves", "terminal", "winning"),
+    [
+        ([0, 1, 0, 1, 0, 1, 0], "red_win", [(2, 0), (3, 0), (4, 0), (5, 0)]),
+        (
+            [0, 1, 1, 2, 4, 2, 2, 3, 4, 3, 5, 3, 3],
+            "red_win",
+            [(2, 3), (3, 2), (4, 1), (5, 0)],
+        ),
+        ([0, 1, 0, 1, 2, 1, 2, 1], "gold_win", [(2, 1), (3, 1), (4, 1), (5, 1)]),
+        (
+            [
+                0,
+                1,
+                2,
+                3,
+                4,
+                5,
+                0,
+                1,
+                2,
+                3,
+                4,
+                5,
+                0,
+                1,
+                2,
+                3,
+                4,
+                5,
+                5,
+                4,
+                3,
+                2,
+                1,
+                0,
+                5,
+                4,
+                3,
+                2,
+                1,
+                0,
+                5,
+                4,
+                3,
+                2,
+                1,
+                0,
+                6,
+                6,
+                6,
+                6,
+                6,
+                6,
+            ],
+            "draw",
+            [],
+        ),
+    ],
+)
+def test_interactive_snapshot_reports_win_directions_and_draw(moves, terminal, winning):
+    game = c4a0_cpp.InteractivePlay(_uniform_eval, 1, 1.0, 0.01)
+    try:
+        for column in moves:
+            assert game.make_move(column)
+        snapshot = game.snapshot()
+        assert snapshot.terminal_state == terminal
+        assert sorted(snapshot.winning_cells) == sorted(winning)
+    finally:
+        game.close()
+
+
 def test_empty_requests_return_without_calling_callback():
     def unexpected_callback(*_args):
         raise AssertionError("empty self-play must not evaluate positions")
@@ -92,6 +191,33 @@ def test_empty_requests_return_without_calling_callback():
         [], 0, 0, float("nan"), float("nan"), unexpected_callback
     )
     assert result.results == []
+
+
+def test_self_play_progress_and_cancellation_callbacks():
+    updates = []
+    result = c4a0_cpp.play_games(
+        [c4a0_cpp.GameMetadata(game_id, 0, 0) for game_id in range(3)],
+        16,
+        1,
+        1.4,
+        0.01,
+        _uniform_eval,
+        lambda completed, total: updates.append((completed, total)),
+    )
+    assert len(result.results) == 3
+    assert sorted(updates) == [(1, 3), (2, 3), (3, 3)]
+
+    with pytest.raises(RuntimeError, match="self-play cancelled"):
+        c4a0_cpp.play_games(
+            [c4a0_cpp.GameMetadata(0, 0, 0)],
+            1,
+            100,
+            1.4,
+            0.01,
+            _uniform_eval,
+            None,
+            lambda: True,
+        )
 
 
 def test_one_iteration_self_play_never_samples_a_full_column():
@@ -249,9 +375,7 @@ def test_result_cbor_pickle_addition_and_split_round_trips():
     train, test = games.split_train_test(0.5, 1337)
     assert train
     assert test
-    assert len(train) + len(test) == sum(
-        len(game.samples) for game in games.results
-    )
+    assert len(train) + len(test) == sum(len(game.samples) for game in games.results)
     with pytest.raises(ValueError):
         games.split_train_test(1.1, 1337)
     with pytest.raises(ValueError):

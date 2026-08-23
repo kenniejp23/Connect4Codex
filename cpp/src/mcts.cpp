@@ -344,6 +344,15 @@ QValue MctsGame::root_q_penalty() const { return root_->q_penalty(); }
 
 QValue MctsGame::root_q_no_penalty() const { return root_->q_no_penalty(); }
 
+std::vector<Move> MctsGame::move_history() const {
+  std::vector<Move> result;
+  result.reserve(moves_.size());
+  for (const auto& move : moves_) {
+    result.push_back(move.move);
+  }
+  return result;
+}
+
 GameResult MctsGame::to_result(float c_ply_penalty) && {
   const auto terminal = root_->position.terminal_values(c_ply_penalty);
   if (!terminal.has_value()) {

@@ -92,11 +92,25 @@ mise exec -- uv run python src/c4a0/main.py --help
 
 Current commands:
 
+- `gui`: launch the native PySide6/Qt Quick desktop application
 - `train`: train via self-play
 - `play`: open the terminal UI and play against a model/random/uniform player
 - `score`: score generated policies with an external Connect Four solver
 - `nn-sweep`: Optuna sweep over NN hyperparameters using existing training data
 - `mcts-sweep`: Optuna sweep over self-play/MCTS hyperparameters
+
+## Desktop UI
+
+Launch the Linux-first desktop interface from a source checkout:
+
+```sh
+mise run gui
+```
+
+The interface keeps one compute-heavy job active at a time and queues additional training,
+evaluation, sweep, scoring, or validation work. Worker processes emit structured events so the Qt
+event loop stays responsive. Application preferences are stored with Qt's user settings; training
+artifacts and Optuna databases remain the durable experiment records.
 
 ## Smoke train a model
 

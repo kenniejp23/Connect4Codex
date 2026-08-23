@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <vector>
 
 #include "c4a0/mcts.hpp"
 
@@ -16,12 +17,14 @@ struct Snapshot {
   float c_exploration{};
   float c_ply_penalty{};
   bool background_running{};
+  std::vector<Move> moves;
 };
 
 class InteractivePlay {
  public:
   InteractivePlay(Evaluator& evaluator, std::size_t max_mcts_iterations,
-                  float c_exploration, float c_ply_penalty, Position position = {});
+                  float c_exploration, float c_ply_penalty, Position position = {},
+                  GameMetadata metadata = {});
   ~InteractivePlay();
   InteractivePlay(const InteractivePlay&) = delete;
   InteractivePlay& operator=(const InteractivePlay&) = delete;

@@ -38,6 +38,7 @@ class MctsGame {
   [[nodiscard]] Policy root_policy() const;
   [[nodiscard]] QValue root_q_penalty() const;
   [[nodiscard]] QValue root_q_no_penalty() const;
+  [[nodiscard]] std::vector<Move> move_history() const;
   [[nodiscard]] GameResult to_result(float c_ply_penalty) &&;
 
  private:

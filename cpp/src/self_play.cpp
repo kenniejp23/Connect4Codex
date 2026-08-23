@@ -256,7 +256,9 @@ std::vector<GameResult> self_play(Evaluator& evaluator,
                                   std::vector<GameMetadata> requests,
                                   std::size_t max_nn_batch_size,
                                   std::size_t n_mcts_iterations, float c_exploration,
-                                  float c_ply_penalty) {
+                                  float c_ply_penalty,
+                                  SelfPlayProgressCallback progress_callback,
+                                  CancellationCallback cancelled_callback) {
   if (requests.empty()) {
     return {};
   }
@@ -276,6 +278,7 @@ std::vector<GameResult> self_play(Evaluator& evaluator,
   results.reserve(game_count);
   std::mutex results_mutex;
   std::atomic<std::size_t> games_remaining{game_count};
+  std::atomic<std::size_t> cancellation_checks{};
   std::stop_source cancellation;
   std::mutex error_mutex;
   std::exception_ptr first_error;
@@ -314,6 +317,9 @@ std::vector<GameResult> self_play(Evaluator& evaluator,
         pending_games.reserve(game_count);
 
         while (!stop_token.stop_requested()) {
+          if (cancelled_callback && cancelled_callback()) {
+            throw std::runtime_error("self-play cancelled");
+          }
           if (pending_games.empty()) {
             auto game = neural_queue.pop(stop_token);
             if (!game) {
@@ -402,6 +408,11 @@ std::vector<GameResult> self_play(Evaluator& evaluator,
       mcts_threads.emplace_back([&](std::stop_token) {
         try {
           while (!stop_token.stop_requested()) {
+            if (cancelled_callback &&
+                (cancellation_checks.fetch_add(1) & 0x3ffU) == 0U &&
+                cancelled_callback()) {
+              throw std::runtime_error("self-play cancelled");
+            }
             auto job = mcts_queue.pop(stop_token);
             if (!job) {
               return;
@@ -437,7 +448,11 @@ std::vector<GameResult> self_play(Evaluator& evaluator,
             }
             progress.game_finished();
 
-            if (games_remaining.fetch_sub(1) == 1) {
+            const std::size_t previous_remaining = games_remaining.fetch_sub(1);
+            if (progress_callback) {
+              progress_callback(game_count - previous_remaining + 1, game_count);
+            }
+            if (previous_remaining == 1) {
               close_queues();
               return;
             }

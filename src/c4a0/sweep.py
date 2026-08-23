@@ -1,5 +1,5 @@
 import functools
-from typing import List
+from typing import Callable, List, Optional
 
 from loguru import logger
 import optuna
@@ -8,6 +8,7 @@ from pytorch_lightning.callbacks import EarlyStopping
 
 from c4a0.training import SampleDataModule, TrainingGen
 from c4a0.nn import ConnectFourNet, ModelConfig
+from c4a0.config import NNSweepConfig
 from c4a0_cpp import Sample  # type: ignore
 
 
@@ -24,31 +25,51 @@ def load_samples(base_dir: str, n_gens: int = 5) -> List[Sample]:
     return samples
 
 
-def objective(trial: optuna.Trial, samples: List[Sample]):
+def objective(trial: optuna.Trial, samples: List[Sample], config: NNSweepConfig):
     model_config = ModelConfig(
-        n_residual_blocks=trial.suggest_int("n_residual_blocks", 0, 1),
-        conv_filter_size=trial.suggest_int("conv_filter_size", 16, 64),
-        n_policy_layers=trial.suggest_int("n_policy_layers", 0, 4),
-        n_value_layers=trial.suggest_int("n_value_layers", 0, 2),
-        lr_schedule={0: trial.suggest_loguniform("learning_rate", 1e-4, 1e-2)},
-        l2_reg=trial.suggest_loguniform("l2_reg", 1e-5, 1e-3),
+        n_residual_blocks=trial.suggest_int(
+            "n_residual_blocks",
+            config.residual_blocks_min,
+            config.residual_blocks_max,
+        ),
+        conv_filter_size=trial.suggest_int(
+            "conv_filter_size", config.filter_size_min, config.filter_size_max
+        ),
+        n_policy_layers=trial.suggest_int(
+            "n_policy_layers", config.policy_layers_min, config.policy_layers_max
+        ),
+        n_value_layers=trial.suggest_int(
+            "n_value_layers", config.value_layers_min, config.value_layers_max
+        ),
+        lr_schedule={
+            0: trial.suggest_float(
+                "learning_rate",
+                config.learning_rate_min,
+                config.learning_rate_max,
+                log=True,
+            )
+        },
+        l2_reg=trial.suggest_float(
+            "l2_reg", config.l2_reg_min, config.l2_reg_max, log=True
+        ),
     )
     model = ConnectFourNet(model_config)
 
-    batch_size = trial.suggest_categorical("batch_size", [256, 512, 1024])
+    batch_size = trial.suggest_categorical("batch_size", config.batch_sizes)
 
     split_idx = int(0.8 * len(samples))
     train, test = samples[:split_idx], samples[split_idx:]
     data_module = SampleDataModule(train, test, batch_size)
 
     trainer = pl.Trainer(
-        max_epochs=30,
+        max_epochs=config.max_epochs,
         accelerator="auto",
         devices="auto",
         callbacks=[
             EarlyStopping(monitor="val_loss", patience=4, mode="min"),
         ],
         enable_progress_bar=False,  # Disable progress bar for cleaner logs
+        enable_model_summary=False,
     )
 
     trainer.fit(model, data_module)
@@ -59,19 +80,40 @@ def objective(trial: optuna.Trial, samples: List[Sample]):
 
 
 def perform_hparam_sweep(base_dir: str, study_name: str = "sweep_hparam"):
-    samples = load_samples(base_dir)
+    return perform_hparam_sweep_config(
+        NNSweepConfig(base_dir=base_dir, study_name=study_name)
+    )
 
-    storage_name = f"sqlite:///{study_name}.db"
+
+def perform_hparam_sweep_config(
+    config: NNSweepConfig,
+    progress_callback: Optional[Callable[[int, int], None]] = None,
+    should_cancel: Optional[Callable[[], bool]] = None,
+):
+    samples = load_samples(config.base_dir, config.n_gens)
+
+    storage_name = f"sqlite:///{config.study_name}.db"
     study = optuna.create_study(
-        study_name=study_name,
+        study_name=config.study_name,
         storage=storage_name,
         load_if_exists=True,
         direction="minimize",
         pruner=optuna.pruners.MedianPruner(),
     )
 
+    def on_trial_complete(
+        study: optuna.Study, _trial: optuna.trial.FrozenTrial
+    ) -> None:
+        if progress_callback is not None:
+            progress_callback(len(study.trials), config.n_trials)
+        if should_cancel is not None and should_cancel():
+            study.stop()
+
     study.optimize(
-        functools.partial(objective, samples=samples), n_trials=100, catch=(Exception,)
+        functools.partial(objective, samples=samples, config=config),
+        n_trials=config.n_trials,
+        catch=(Exception,),
+        callbacks=[on_trial_complete],
     )
 
     logger.info("Best trial:")
@@ -90,3 +132,4 @@ def perform_hparam_sweep(base_dir: str, study_name: str = "sweep_hparam"):
     logger.info(
         f"  Completed trials: {len(study.get_trials(states=[optuna.trial.TrialState.COMPLETE]))}"
     )
+    return study

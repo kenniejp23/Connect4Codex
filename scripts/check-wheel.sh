@@ -31,15 +31,18 @@ UV_LINK_MODE=hardlink uv pip install --python "$venv_dir/bin/python" "$wheel_pat
 cd "$venv_dir"
 env -u PYTHONPATH "$venv_dir/bin/python" - <<'PY'
 import importlib.util
+from importlib.resources import files
 
 import numpy as np
 
 import c4a0
 import c4a0_cpp
+import c4a0.gui.app
 
 assert c4a0_cpp.N_ROWS == 6
 assert c4a0_cpp.N_COLS == 7
 assert importlib.util.find_spec("c4a0_rust") is None
+assert files("c4a0.gui").joinpath("qml", "Main.qml").is_file()
 
 def evaluate(_model_id, positions):
     batch_size = positions.shape[0]
