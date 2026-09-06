@@ -1,278 +1,177 @@
-# Development Guide
+# Development guide
 
-This project has two main parts:
+## Build and tools
 
-- `cpp/`: C++20 Connect Four rules, MCTS, self-play, solver interface, TUI, and nanobind bindings.
-- `src/c4a0/`: PyTorch/PyTorch Lightning model, training loop, sweeps, and CLI commands.
-
-The CLI entrypoint is `src/c4a0/main.py`.
-
-## Tooling model
-
-Use [`mise`](https://mise.jdx.dev/) as the project entrypoint. `mise.toml` pins and bootstraps the required tools:
-
-- `uv` for Python dependency management
-- CMake and Ninja for the C++ build
-- a C++20 compiler (GCC 13+ or Clang 18+ on the supported Linux target)
-
-Install mise once, then from the repo root run:
+From the repository root:
 
 ```sh
 mise trust
 mise install
-```
-
-The CMake build fetches pinned C++ dependencies and compiles SQLite into the extension. A C++20
-compiler, CMake, and Ninja are the only native build prerequisites.
-
-## Common tasks
-
-List tasks:
-
-```sh
-mise tasks
-```
-
-Install dependencies and build the editable package:
-
-```sh
-mise run install
 mise run build
 ```
 
-Run local validation:
+[`mise.toml`](../mise.toml) pins Python 3.11.13, uv 0.11.25, CMake 3.28.3, and Ninja 1.13.0.
+Provide Git and a C/C++20 compiler separately. CMake fetches pinned nlohmann/json, FTXUI, SQLite,
+and Catch2 (for tests); Release builds require interprocedural optimization support.
+
+The package uses scikit-build-core and nanobind. `mise run install` runs `uv sync --frozen`;
+`mise run build` forces package reinstallation to rebuild the native extension. Development
+dependencies are declared in `dependency-groups.dev` in [`pyproject.toml`](../pyproject.toml).
 
 ```sh
-mise run lint
-mise run typecheck
-mise run test:cpp
-mise run test:python
-mise run check
+uv run python -c 'import c4a0, c4a0_cpp; print(c4a0_cpp.N_ROWS, c4a0_cpp.N_COLS)'
 ```
 
-The Linux TSan preset runs discovered tests through `setarch x86_64 -R`. Disabling ASLR for the
-test process avoids GCC TSan's documented early-runtime `unexpected memory mapping` failure on the
-supported Pop!_OS/Ubuntu hosts; it does not alter production builds.
+## Validation tasks
 
-Run the full CI suite locally, including smoke training:
+| Task | What it runs |
+| --- | --- |
+| `mise run lint` | Ruff and clang-format checks |
+| `mise run typecheck` | Pyright |
+| `mise run test:cpp` | Debug CMake build and CTest |
+| `mise run test:python` | Package rebuild and pytest |
+| `mise run check` | Lint, typecheck, native tests, Python tests |
+| `mise run test:wheel` | Wheel build and imports in a clean environment |
+| `mise run train:smoke` | Bounded asynchronous CPU training integration test |
+| `mise run ci` | Check tasks, wheel check, and training smoke test |
+| `mise run test:sanitize` | AddressSanitizer and UndefinedBehaviorSanitizer native tests |
+| `mise run test:thread` | ThreadSanitizer native tests |
 
-```sh
-mise run ci
-```
+[GitHub Actions](../.github/workflows/ci.yaml) runs `ci` and separate sanitizer jobs on
+`ubuntu-latest`. The TSan preset uses `/usr/bin/setarch x86_64 -R`, requiring a host that permits
+that personality change. See [`CMakePresets.json`](../CMakePresets.json) for all native presets.
 
-CI uses the same task:
+The smoke task selects
+`tests/c4a0_tests/training_v2_test.py::test_async_worker_completes_after_one_candidate_decision`.
+It exercises a temporary V2 run through replay generation, training, and one arena decision.
 
-```sh
-mise run ci
-```
+## CLI
 
-## Packaging/import check
+Use `uv run c4a0 --help` or `uv run c4a0 <command> --help` for the full option list.
+The entry point is [`src/c4a0/main.py`](../src/c4a0/main.py).
 
-This is a mixed scikit-build-core Python/C++ package. After `mise run build`, both imports should work without `PYTHONPATH` hacks:
+| Command | Purpose |
+| --- | --- |
+| `gui` | Launch PySide6/Qt Quick desktop UI |
+| `train` | Create/resume asynchronous V2 training |
+| `train-legacy` | Run synchronous generation-based Lightning training |
+| `training-status` | Print V2 manifest and replay status as JSON |
+| `play` | Interactive terminal play, including human/human and AI/AI modes |
+| `minimax-test` | Evaluate a model against a random/minimax ladder |
+| `benchmark-training` | Write a fixed-work neural benchmark report |
+| `compare-training-benchmarks` | Compare V2 and frozen Rust benchmark reports |
+| `nn-sweep` | Optuna network sweep over legacy training data |
+| `mcts-sweep` | Optuna MCTS sweep using the legacy training workflow and solver |
+| `score` | Score legacy self-play policies with the external solver |
 
-```sh
-mise exec -- uv run python - <<'PY'
-import c4a0
-import c4a0_cpp
-
-print(c4a0.__file__)
-print(c4a0_cpp.N_ROWS, c4a0_cpp.N_COLS)
-PY
-```
-
-`c4a0_cpp` re-exports the native `c4a0_cpp._native` nanobind extension.
-
-## CLI commands
-
-Show available commands:
-
-```sh
-mise exec -- uv run python src/c4a0/main.py --help
-```
-
-Current commands:
-
-- `gui`: launch the native PySide6/Qt Quick desktop application
-- `train`: train via self-play
-- `play`: open the terminal UI and play against a model/random/uniform player
-- `score`: score generated policies with an external Connect Four solver
-- `nn-sweep`: Optuna sweep over NN hyperparameters using existing training data
-- `mcts-sweep`: Optuna sweep over self-play/MCTS hyperparameters
-
-## Desktop UI
-
-Launch the Linux-first desktop interface from a source checkout:
+## Desktop application
 
 ```sh
 mise run gui
 ```
 
-The interface keeps one compute-heavy job active at a time and queues additional training,
-evaluation, sweep, scoring, or validation work. Worker processes emit structured events so the Qt
-event loop stays responsive. Application preferences are stored with Qt's user settings; training
-artifacts and Optuna databases remain the durable experiment records.
+[`gui/app.py`](../src/c4a0/gui/app.py) exposes application state to QML.
+[`gui/jobs.py`](../src/c4a0/gui/jobs.py) queues compute jobs and launches
+[`worker.py`](../src/c4a0/worker.py) subprocesses that emit structured events.
+A single queued job runs at a time; a V2 training job itself has actor and learner subprocesses.
 
-## Smoke train a model
+The UI provides play, training and sweep configuration, model/data inspection, tournaments,
+solver scoring, settings, and validation. Model inspection distinguishes V2 attempts from legacy
+generations. Solver scoring and the sweeps use legacy data/workflows. Settings persist via
+`QSettings`; run artifacts and Optuna databases are stored separately on disk.
 
-Run the checked-in smoke task:
-
-```sh
-mise run train:smoke
-```
-
-The task runs the bounded process-level integration test. It creates a temporary V2 run, generates
-an atomic CBOR shard, trains from replay, submits a candidate, completes an arena decision, reloads
-the champion, and exits after that decision. No solver path is present in the V2 worker.
-
-V2 artifacts use this layout:
-
-```text
-training-v2/run.sqlite3
-training-v2/arena_openings.json
-training-v2/replay/*.cbor
-training-v2/attempts/<attempt>/model.pt
-training-v2/learner.pt
-training-v2/tensorboard/events.out.tfevents.*
-```
-
-The coordinator is the only manifest writer. A staged shard is fsynced and atomically renamed
-before registration; whole old shards are retired only after the trainer releases them. Use
-`uv run c4a0 training-status --base-dir training-v2` for the champion, pending candidate, component
-progress, replay occupancy, and globally unique next game ID.
-
-Legacy timestamped `metadata.json`, `games.pkl`, and `model.pkl` generations are still supported by
-`train-legacy` and all playback/evaluation loaders.
-
-## Inspect legacy self-play stats
-
-Use this only for a `train-legacy` directory; V2 inspection uses `training-status`:
-
-```sh
-mise exec -- uv run python - <<'PY'
-from c4a0.training import TrainingGen
-
-base = "training/ci-smoke"
-for gen in reversed(TrainingGen.load_all(base)):
-    games = gen.get_games(base)
-    if games is None:
-        print(f"gen={gen.gen_n}: root/no games, val_loss={gen.val_loss}, solver_score={gen.solver_score}")
-        continue
-    lengths = [len(g.samples) for g in games.results]
-    scores = [g.player0_score() for g in games.results]
-    print(
-        f"gen={gen.gen_n}: games={len(games.results)}, "
-        f"unique_positions={games.unique_positions()}, "
-        f"samples={sum(lengths)}, min_len={min(lengths)}, max_len={max(lengths)}, "
-        f"avg_len={sum(lengths)/len(lengths):.2f}, "
-        f"p0_score_avg={sum(scores)/len(scores):.3f}, "
-        f"val_loss={gen.val_loss}, solver_score={gen.solver_score}"
-    )
-PY
-```
-
-## Full/default training
-
-The defaults target the detected CUDA device and a 4 GB-class GPU:
+## V2 training
 
 ```sh
 uv run c4a0 train --base-dir training-v2 --max-gens 10
+uv run c4a0 training-status --base-dir training-v2
 ```
 
-Useful knobs:
+Configuration is validated by `TrainingV2Config` in [`config.py`](../src/c4a0/config.py).
+Device selection prefers CUDA, then MPS on macOS, otherwise CPU; the macOS detection path raises
+if MPS is unavailable. `--device` provides an explicit override.
 
-- `--device cpu|cuda|mps`
-- `--self-play-shard-games`
-- `--self-play-batch-games` (native concurrency; must be a whole multiple of the durable shard size)
-- `--n-mcts-iterations`
-- `--inference-batch-size`
-- `--mcts-worker-threads` (`0` uses the benchmarked native automatic setting)
-- `--precision auto|16-mixed|32-true`
-- `--inference-amp-min-batch-size`
-- `--training-batch-size`
-- `--replay-capacity-games`
-- `--replay-ratio`
-- `--arena-pair-batch-size`
-- `--max-candidate-attempts` (a bounded experiment/smoke safeguard)
-- `--base-dir`
-- `--max-gens` (accepted champions, not rejected attempts)
+On resume, persisted training/search configuration takes precedence over new CLI values. The
+invocation can change `base_dir`, `device`, `max_gens`, and `max_candidate_attempts`. A run that has
+already reached its accepted-promotion limit returns immediately when no candidate is pending.
 
-The CUDA defaults were selected from the utilization and throughput sweeps documented in the
-[end-to-end training benchmark](training-benchmark.md). They intentionally optimize completed
-games and positions per second rather than maximizing the GPU percentage shown by `nvidia-smi`.
+Selected CLI defaults:
 
-## Play against a model
+| Setting | Default / behavior |
+| --- | --- |
+| `--run-seed` | `1337` |
+| `--n-mcts-iterations` | `1400` |
+| `--mcts-value-scale`, `--value-loss-weight` | Both `0.0`: policy/terminal search and policy-only loss |
+| `--self-play-batch-games` | `512`, a whole multiple of the shard size |
+| `--self-play-shard-games` | `256` |
+| `--replay-capacity-games`, `--replay-warmup-games` | `20000`, `2048` |
+| `--replay-ratio` | `4.0` |
+| `--training-batch-size`, `--inference-batch-size` | `512`, `128` |
+| `--mcts-worker-threads` | `0`, native automatic selection |
+| `--precision` | `auto`; also accepts `16-mixed` and `32-true` |
+| `--inference-amp-min-batch-size` | `96` |
+| `--arena-min-games`, `--arena-max-games` | `40`, `800`, both even |
+| `--arena-pair-batch-size` | `100` color-swapped pairs per batch |
+| `--max-gens` | Unbounded unless set; limits run-wide accepted promotions |
+| `--max-candidate-attempts` | Unbounded unless set; bounds decisions in this invocation |
 
-After the V2 run has its attempt-0 champion:
+The opponent weights default to 65% champion, 30% accepted archive, 2.5% uniform, and 2.5% random.
+Search uses root Dirichlet noise and temperature-controlled sampling for self-play. The arena
+uses persisted openings and paired colors with SPRT thresholds. A rejection can retain a learner
+incumbent whose arena score meets `--learner-incumbent-min-score` (default `0.5`); otherwise the
+learner falls back to the champion or a retained qualifying incumbent.
 
-```sh
-uv run c4a0 play --base-dir training-v2 --model best
+Actor pause/resume watermarks (`--debt-pause-shards 2`, `--debt-resume-shards 1`) limit outstanding
+replay training work. CUDA inference can reduce its effective batch size after an out-of-memory
+error. These defaults are fixed configuration values, not automatic GPU-capacity tuning.
+
+Artifacts:
+
+```text
+training-v2/
+  run.sqlite3                     # manifest, configuration, attempts, replay and progress
+  arena_openings.json             # reusable arena openings
+  replay/<first-game-id>.cbor      # durable game shards
+  attempts/<attempt>/model.pt      # versioned model checkpoints
+  learner.pt                      # resumable learner and optimizer state
+  tensorboard/events.out.tfevents.*
 ```
 
-Other model options:
-
-```sh
-uv run c4a0 play --model random
-uv run c4a0 play --model uniform
-```
-
-This opens a terminal UI, so run it in an interactive terminal.
-
-## TensorBoard / dev server
-
-There is no web app dev server in this repo. The useful local servers are for experiment inspection:
+The coordinator writes the manifest; shards are atomically saved before registration. Replay
+retirement operates on whole shards after release by the learner. Accepted checkpoints remain;
+rejected checkpoint pruning keeps the configured recent count (default three) and any preserved
+learner incumbent. Attempt zero initializes the champion. V2 refuses legacy generation directories.
 
 ```sh
 uv run tensorboard --logdir training-v2/tensorboard --port 6006
+uv run c4a0 play --base-dir training-v2 --model best
 ```
 
-For Optuna sweeps:
+## Legacy training and scoring
 
 ```sh
-mise exec -- uv run optuna-dashboard sqlite:///optuna.db
+uv run c4a0 train-legacy --base-dir training --max-gens 3 \
+  --max-epochs 20 --early-stopping-patience 5
 ```
 
-## Optional solver scoring
+Legacy generations store `metadata.json`, `games.pkl`, and `model.pkl`. Lightning uses the run's
+base directory as `default_root_dir`. Play and tournament loaders support legacy models as well
+as V2 checkpoints. V2 does not convert or modify legacy generations.
 
-The solver is optional and is not used for training. It scores generated policies against objective Connect Four solutions.
-
-For replacement decisions, use the reproducible [end-to-end training benchmark](training-benchmark.md).
-It compares V2 with the frozen sequential Rust workflow and deliberately fails closed when solver
-results or another required metric are absent.
+Given a built Pascal Pons Connect Four solver and its opening book:
 
 ```sh
-git clone https://github.com/PascalPons/connect4.git solver
-cd solver
-make
-wget https://github.com/PascalPons/connect4/releases/download/book/7x6.book
-cd ..
+uv run c4a0 score solver/c4solver solver/7x6.book --base-dir training
+uv run c4a0 train-legacy --base-dir training \
+  --solver-path solver/c4solver --book-path solver/7x6.book
 ```
 
-Score an existing training directory:
+The solver scores generated policies; its results are not training targets. The default cache is
+`./solutions.db`. `train` has no solver options. Sweep databases can be inspected with:
 
 ```sh
-mise exec -- uv run python src/c4a0/main.py score solver/c4solver solver/7x6.book --base-dir training/ci-smoke
+uv run optuna-dashboard sqlite:///optuna.db
 ```
 
-Or score during training:
-
-```sh
-mise exec -- uv run python src/c4a0/main.py train \
-  --solver-path solver/c4solver \
-  --book-path solver/7x6.book
-```
-
-Scores are cached in `solutions.db` by default.
-
-## Verified checks
-
-The release gate covers:
-
-- `mise run build`: builds and installs the mixed Python/C++ package
-- `mise run lint`: Ruff passed
-- `mise run typecheck`: Pyright passed with 0 errors
-- `mise run test:cpp`: runs native CTest unit and property tests
-- `mise run test:python`: Python API, training, tournament, and native-boundary tests
-- `mise run train:smoke`: runs bounded asynchronous shard, replay, candidate, and arena training
-
-The terminal UI suite creates its own pseudo-terminal and verifies terminal restoration on both
-normal exit and evaluator failure.
+For measurement commands and their scope, see [native performance](native-performance.md) and
+[training benchmarks](training-benchmark.md).

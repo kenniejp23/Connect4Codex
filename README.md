@@ -1,152 +1,106 @@
-# c4a0: Connect Four Alpha-Zero
+# c4a0: Connect Four AlphaZero
 
-An Alpha-Zero-style Connect Four engine trained entirely via self play.
+A Connect Four application with neural-guided Monte Carlo Tree Search (MCTS), self-play training,
+a PySide6/Qt Quick desktop interface, and a terminal interface.
 
-The game logic, Monte Carlo Tree Search, multi-threaded self-play engine, solver cache, and terminal
-UI are implemented in C++20 under [`cpp/`](cpp/).
+The C++20 engine implements game rules, search, batched self-play, serialization, the external
+solver interface, and the terminal UI. Python provides the PyTorch network, training coordinator,
+evaluation tools, and desktop UI through the `c4a0_cpp` nanobind extension.
 
-The neural network is written in Python/PyTorch under [`src/c4a0/`](src/c4a0/) and calls the C++
-engine through the `c4a0_cpp` nanobind extension.
+## Setup
 
-![Terminal UI](https://raw.githubusercontent.com/advait/c4a0/refs/heads/master/images/tui.png)
-
-## Usage
-
-1. Install [mise](https://mise.jdx.dev/getting-started.html). The checked-in tool configuration
-   installs the pinned Python, uv, CMake, and Ninja versions.
-
-```sh
-curl https://mise.run | sh
-```
-
-2. Install the toolchain, dependencies, and editable package:
+Install mise, Git, and a C/C++ toolchain supporting C++20, then run from the repository root:
 
 ```sh
 mise trust
 mise install
 mise run build
-```
-
-3. Run the complete validation suite:
-
-```sh
-mise run check
-```
-
-4. Launch the native desktop application:
-
-```sh
 mise run gui
-# or, after installation
-uv run c4a0 gui
 ```
 
-The desktop UI provides mouse and keyboard play, live MCTS analysis, training and sweep
-configuration, model/data inspection, tournaments, solver scoring, and developer validation. The
-existing terminal commands remain available.
+[`mise.toml`](mise.toml) pins Python, uv, CMake, and Ninja. The compiler is supplied by the host.
+The build downloads pinned native dependencies and installs the editable Python package.
+The checked-in CI targets Linux.
 
-5. Train a network with the asynchronous, neural-only V2 pipeline:
+## Train and inspect a run
 
 ```sh
 uv run c4a0 train --base-dir training-v2 --max-gens 10
 uv run c4a0 training-status --base-dir training-v2
+uv run tensorboard --logdir training-v2/tensorboard --port 6006
 ```
 
-`train` creates or resumes only a V2 run. It overlaps self-play and replay training, evaluates
-candidates against the accepted champion with an SPRT arena gate, and uses accepted historical
-networks plus small random/uniform allocations for diversity. `--max-gens` counts newly accepted
-champions. The previous synchronous implementation remains available as `train-legacy`.
+`train` creates or resumes a V2 run. Separate actor and learner processes generate replay data and
+train candidates; a paired SPRT arena evaluates candidates against the accepted champion.
+`--max-gens` sets the run-wide accepted-promotion limit, excluding the initial champion. Use
+`--max-candidate-attempts` to bound candidate decisions, including rejections.
 
-6. Play against the network:
+The opponent mix uses the champion, accepted historical models, and random/uniform evaluators.
+The default `--mcts-value-scale 0.0` and `--value-loss-weight 0.0` disable neural value contributions
+in V2 search and value losses in training, respectively. Policy learning and terminal game outcomes
+remain active. The V2 trainer does not call the external solver.
+
+The synchronous Lightning workflow remains available as `train-legacy`, with its default data
+root at `training/`. See the [development guide](docs/development.md) for configuration and artifacts.
+
+## Play
 
 ```sh
-uv run src/c4a0/main.py play --model=best
+uv run c4a0 play --base-dir training-v2 --model best
+uv run c4a0 play --model random
+uv run c4a0 play --model uniform --mode human-human
+uv run c4a0 play --model best --mode human-ai --human-side blue
+uv run c4a0 play --model best --mode ai-ai
 ```
 
-The default game mode is human-versus-AI: the human plays Red and moves first. Choose a column
-with keys `1` through `7`; after the MCTS search reaches its configured iteration limit, Blue
-makes its move automatically. The TUI labels both colors as Human or AI.
+The terminal UI defaults to human Red versus AI Blue. Keys `1`–`7` select columns; AI turns move
+automatically when the search limit is reached. `B` plays the best searched move and `R` samples
+from the search policy. `best` loads the V2 champion or the latest legacy generation in `--base-dir`;
+it requires an existing model. `random` and `uniform` supply MCTS evaluators and need no checkpoint.
 
-Use `--human-side blue` to let the AI move first, `--mode human-human` for local two-player play,
-or `--mode ai-ai` to watch the selected model play both colors:
+The desktop UI includes play and live search analysis, V2 training controls, model inspection,
+tournaments, legacy-data solver scoring and sweeps, and developer validation. Preferences and
+paths are stored in Qt user settings.
+
+## Evaluate
 
 ```sh
-uv run src/c4a0/main.py play --model best --mode human-ai --human-side blue
-uv run src/c4a0/main.py play --model best --mode human-human
-uv run src/c4a0/main.py play --model best --mode ai-ai
+uv run c4a0 minimax-test --base-dir training-v2 --max-depth 3
 ```
 
-`--model` selects the evaluator used by MCTS: `best` loads the accepted champion, `random`
-uses random policy logits, and `uniform` gives every legal move equal policy weight. `B` plays the
-current best searched move immediately, while `R` samples a move from the current search policy.
+The minimax ladder evaluates against random and successively deeper minimax evaluators with
+color-swapped games. It advances after scoring more than half the configured games in points
+(a draw is half a point), and stops at the first failed level. Both sides use the native search
+pipeline. `--model-path` selects a checkpoint directly. The default maximum depth is 42; the
+example above bounds it to three.
 
-7. (Optional) Download a [connect four solver](https://github.com/PascalPons/connect4?ts=2) to
-   objectively measure training progress:
+The external Pascal Pons solver is optional. Given its executable and opening book, score legacy
+self-play policies with:
 
 ```sh
-git clone https://github.com/PascalPons/connect4.git solver
-cd solver
-make
-# Download opening book to speed up solutions
-wget https://github.com/PascalPons/connect4/releases/download/book/7x6.book
+uv run c4a0 score solver/c4solver solver/7x6.book --base-dir training
 ```
 
-The V2 trainer never imports or invokes the solver. Standalone legacy scoring remains available:
+See [training benchmarks](docs/training-benchmark.md) for fixed-work neural benchmarks and
+[native performance](docs/native-performance.md) for engine-only measurements.
 
-```sh
-uv run python src/c4a0/main.py score solver/c4solver solver/7x6.book
-```
+## Code map
 
-V2 replacement decisions use the fixed-workload [end-to-end training benchmark](docs/training-benchmark.md),
-including a fail-closed comparison with the frozen sequential Rust implementation.
+| Component | Source |
+| --- | --- |
+| CLI and validated configuration | [`main.py`](src/c4a0/main.py), [`config.py`](src/c4a0/config.py) |
+| Desktop UI and job queue | [`gui/`](src/c4a0/gui/), [`worker.py`](src/c4a0/worker.py) |
+| Residual CNN with policy and two value outputs | [`nn.py`](src/c4a0/nn.py) |
+| Asynchronous replay training and champion gate | [`training_v2.py`](src/c4a0/training_v2.py) |
+| Legacy generation training | [`training.py`](src/c4a0/training.py) |
+| Bitboard rules, MCTS, and self-play | [`cpp/src/`](cpp/src/) |
+| Native Python API and type stubs | [`src/c4a0_cpp/`](src/c4a0_cpp/) |
 
-## Data compatibility
+## Validation and license
 
-V2 checkpoints are versioned PyTorch dictionaries under `training-v2/attempts/`; immutable replay
-shards use native CBOR and the run manifest is SQLite in WAL mode. Accepted checkpoints are kept,
-while old rejected weights are compacted. Legacy `model.pkl` generations remain readable by play,
-tournaments, and `train-legacy`; V2 never modifies a legacy directory.
+`mise run check` runs lint, type checks, native tests, and Python tests. `mise run ci` also checks
+wheel installation and bounded V2 training. These commands describe available checks, not the
+status of a particular checkout.
 
-## Results
-
-After 9 generations of training (approx ~15 min on an RTX 3090) we achieve the following results:
-
-![Training Results](https://raw.githubusercontent.com/advait/c4a0/refs/heads/master/images/learning.png)
-
-## Architecture
-
-### PyTorch NN [`src/c4a0/nn.py`](https://github.com/advait/c4a0/blob/master/src/c4a0/nn.py?ts=2)
-
-A ResNet-style CNN takes a board position and outputs a policy (a probability distribution over
-moves) and Q values (predicted win/loss values in `[-1, 1]`).
-
-Neural-network hyperparameters can be swept via the `nn-sweep` command.
-
-### Connect Four Game Logic [`cpp/src/position.cpp`](cpp/src/position.cpp)
-
-Implements the compact `Position` bitboard representation and all Connect Four rules
-and game logic.
-
-### Monte Carlo Tree Search (MCTS) [`cpp/src/mcts.cpp`](cpp/src/mcts.cpp)
-
-Implements Monte Carlo Tree Search—the core search algorithm behind AlphaZero. It probabilistically
-explores potential game pathways and optimally hones in on the optimal move to play from any
-position.
-
-MCTS relies on outputs from the NN. The output of MCTS helps train the next generation's NN.
-
-### Self Play [`cpp/src/self_play.cpp`](cpp/src/self_play.cpp)
-
-Uses C++20 worker threads and batched Python/PyTorch callbacks to parallelize training-data
-generation.
-
-### Solver [`cpp/src/solver.cpp`](cpp/src/solver.cpp)
-
-Connect Four is a perfectly solved game. See Pascal Pons's [great
-writeup](http://blog.gamesolver.org/) on how to build a perfect solver. We can use these solutions
-to objectively measure our NN's performance. Importantly we **never train on these solutions**,
-instead only using our self-play data to improve the NN's performance.
-
-`solver.cpp` contains the stdin/stdout interface used to obtain objective solutions for training
-positions. Because solutions are expensive to compute, they are cached in a versioned SQLite
-database (`solutions.db`). We then measure how often generated policies recommend optimal moves.
+See [LICENSE.md](LICENSE.md) for the license and [implementation notes](docs/improvements.md)
+for remaining limitations.
