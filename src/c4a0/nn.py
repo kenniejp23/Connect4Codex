@@ -58,6 +58,7 @@ class ConnectFourNet(pl.LightningModule):
 
     def __init__(self, config: ModelConfig):
         super().__init__()
+        self.config = config.model_copy(deep=True)
         self.lr_schedule = config.lr_schedule
         self.l2_reg = config.l2_reg
 
@@ -122,7 +123,7 @@ class ConnectFourNet(pl.LightningModule):
         """
         self.eval()
         pos = torch.from_numpy(x).to(self.device)
-        with torch.no_grad():
+        with torch.inference_mode():
             policy, q_penalty, q_no_penalty = self.forward(pos)
         policy = np.ascontiguousarray(policy.cpu().numpy())
         q_penalty = np.ascontiguousarray(q_penalty.cpu().numpy())
@@ -159,16 +160,33 @@ class ConnectFourNet(pl.LightningModule):
 
     def step(self, batch, log_prefix):
         # Forward pass
-        pos, policy_target, q_penalty_target, q_no_penalty_target = batch
+        pos, policy_target, q_penalty_target, q_no_penalty_target = batch[:4]
+        policy_weight = (
+            batch[4]
+            if len(batch) > 4
+            else torch.ones_like(q_penalty_target, dtype=torch.float32)
+        )
+        value_weight = (
+            batch[5]
+            if len(batch) > 5
+            else torch.ones_like(q_penalty_target, dtype=torch.float32)
+        )
         policy_logprob, q_penalty_pred, q_no_penalty_pred = self.forward(pos)
         policy_logprob_targets = torch.log(policy_target + self.EPS)
 
         # Losses
-        policy_loss = self.policy_kl_div(policy_logprob_targets, policy_logprob)
-        q_penalty_loss = self.q_penalty_mse(q_penalty_pred, q_penalty_target)
-        q_no_penalty_loss = self.q_no_penalty_mse(
-            q_no_penalty_pred, q_no_penalty_target
-        )
+        policy_per_sample = (
+            policy_target * (policy_logprob_targets - policy_logprob)
+        ).sum(dim=1)
+        policy_loss = (
+            policy_per_sample * policy_weight
+        ).sum() / policy_weight.sum().clamp_min(1.0)
+        q_penalty_loss = (
+            ((q_penalty_pred - q_penalty_target) ** 2) * value_weight
+        ).sum() / value_weight.sum().clamp_min(1.0)
+        q_no_penalty_loss = (
+            ((q_no_penalty_pred - q_no_penalty_target) ** 2) * value_weight
+        ).sum() / value_weight.sum().clamp_min(1.0)
         loss = policy_loss + q_penalty_loss + q_no_penalty_loss
 
         value_loss = q_penalty_loss + q_no_penalty_loss

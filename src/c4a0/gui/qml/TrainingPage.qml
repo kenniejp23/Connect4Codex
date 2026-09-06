@@ -13,14 +13,25 @@ Item {
     }
 
     function submitTraining() {
+        var shardGames = Math.min(256, selfPlayGames.value)
+        var batchGames = Math.min(
+            shardGames * 2,
+            Math.floor(selfPlayGames.value / shardGames) * shardGames
+        )
         var config = {
             base_dir: trainingDirectory.text,
             device: device.currentText,
-            n_self_play_games: selfPlayGames.value,
+            replay_warmup_games: selfPlayGames.value,
+            self_play_shard_games: shardGames,
+            self_play_batch_games: batchGames,
+            replay_capacity_games: Math.max(20000, selfPlayGames.value + 1),
+            replay_ratio: 4.0,
+            validation_fraction: 0.05,
+            archive_depth: 8,
             n_mcts_iterations: trainingMcts.value,
             c_exploration: Number(exploration.text),
             c_ply_penalty: Number(plyPenalty.text),
-            self_play_batch_size: selfPlayBatch.value,
+            inference_batch_size: selfPlayBatch.value,
             training_batch_size: trainBatch.value,
             n_residual_blocks: residualBlocks.value,
             conv_filter_size: filters.value,
@@ -29,11 +40,11 @@ Item {
             lr_schedule: scheduleValues(),
             l2_reg: Number(l2.text),
             max_gens: generations.value,
-            max_epochs: maxEpochs.value,
-            early_stopping_patience: patience.value,
-            solver_path: solverPath.text.length ? solverPath.text : null,
-            book_path: bookPath.text.length ? bookPath.text : null,
-            solutions_path: solutionsPath.text
+            arena_min_games: 40,
+            arena_max_games: 200,
+            root_dirichlet_epsilon: 0.25,
+            root_dirichlet_alpha: 0.30,
+            temperature_cutoff_ply: 8
         }
         Jobs.submit("training", JSON.stringify(config), "Train " + trainingDirectory.text)
     }
@@ -41,17 +52,17 @@ Item {
     function applyPreset(name) {
         if (name === "CPU") {
             device.currentIndex = device.find("cpu")
-            selfPlayGames.value = 100; trainingMcts.value = 100
+            selfPlayGames.value = 256; trainingMcts.value = 100
             selfPlayBatch.value = 64; trainBatch.value = 128
             filters.value = 16; policyLayers.value = 2; valueLayers.value = 1
             generations.value = 3
         } else if (name === "Balanced") {
-            selfPlayGames.value = 500; trainingMcts.value = 600
-            selfPlayBatch.value = 512; trainBatch.value = 512
+            selfPlayGames.value = 1024; trainingMcts.value = 600
+            selfPlayBatch.value = 128; trainBatch.value = 256
             generations.value = 5
         } else {
-            selfPlayGames.value = 1700; trainingMcts.value = 1400
-            selfPlayBatch.value = 2000; trainBatch.value = 2000
+            selfPlayGames.value = 2048; trainingMcts.value = 1400
+            selfPlayBatch.value = 128; trainBatch.value = 512
             filters.value = 32; policyLayers.value = 4; valueLayers.value = 2
             generations.value = 10
         }
@@ -80,7 +91,7 @@ Item {
                     SectionTitle {
                         width: parent.width
                         title: "Configure training"
-                        subtitle: "Generate self-play games, train the next network generation, and optionally score it with the perfect solver."
+                        subtitle: "Run asynchronous neural self-play, replay training, and champion gating."
                     }
 
                     Text { text: "PRESET"; color: ApplicationWindow.window.faintTextColor; font.pixelSize: 10; font.weight: Font.DemiBold; font.letterSpacing: 1 }
@@ -105,13 +116,13 @@ Item {
                         }
                         Column {
                             Layout.fillWidth: true; spacing: 6
-                            Text { text: "Target generations"; color: ApplicationWindow.window.mutedTextColor; font.pixelSize: 12 }
+                            Text { text: "Target accepted champions"; color: ApplicationWindow.window.mutedTextColor; font.pixelSize: 12 }
                             SpinBox { id: generations; width: parent.width; height: 44; from: 1; to: 10000; value: 10; editable: true }
                         }
                         Column {
                             Layout.fillWidth: true; spacing: 6
-                            Text { text: "Self-play games / generation"; color: ApplicationWindow.window.mutedTextColor; font.pixelSize: 12 }
-                            SpinBox { id: selfPlayGames; width: parent.width; height: 44; from: 1; to: 10000000; value: 1700; editable: true }
+                            Text { text: "Fresh games / candidate"; color: ApplicationWindow.window.mutedTextColor; font.pixelSize: 12 }
+                            SpinBox { id: selfPlayGames; width: parent.width; height: 44; from: 2; to: 10000000; value: 2048; editable: true }
                         }
                         Column {
                             Layout.fillWidth: true; spacing: 6
@@ -136,11 +147,11 @@ Item {
                             width: parent.width; columns: 3; columnSpacing: 12; rowSpacing: 12
                             Column { Layout.fillWidth: true
                                 Text { text: "Inference batch"; color: ApplicationWindow.window.mutedTextColor; font.pixelSize: 11 }
-                                SpinBox { id: selfPlayBatch; width: parent.width; from: 1; to: 1000000; value: 2000; editable: true }
+                                SpinBox { id: selfPlayBatch; width: parent.width; from: 1; to: 1000000; value: 128; editable: true }
                             }
                             Column { Layout.fillWidth: true
                                 Text { text: "Training batch"; color: ApplicationWindow.window.mutedTextColor; font.pixelSize: 11 }
-                                SpinBox { id: trainBatch; width: parent.width; from: 1; to: 1000000; value: 2000; editable: true }
+                                SpinBox { id: trainBatch; width: parent.width; from: 2; to: 1000000; value: 512; editable: true }
                             }
                             LabeledField { id: plyPenalty; Layout.fillWidth: true; label: "Ply penalty"; text: "0.01"; validator: DoubleValidator { bottom: 0 } }
                             Column { Layout.fillWidth: true
@@ -159,28 +170,16 @@ Item {
                                 Text { text: "Value layers"; color: ApplicationWindow.window.mutedTextColor; font.pixelSize: 11 }
                                 SpinBox { id: valueLayers; width: parent.width; from: 1; to: 64; value: 2; editable: true }
                             }
-                            Column { Layout.fillWidth: true
-                                Text { text: "Max epochs"; color: ApplicationWindow.window.mutedTextColor; font.pixelSize: 11 }
-                                SpinBox { id: maxEpochs; width: parent.width; from: 1; to: 10000; value: 100; editable: true }
-                            }
-                            Column { Layout.fillWidth: true
-                                Text { text: "Early-stop patience"; color: ApplicationWindow.window.mutedTextColor; font.pixelSize: 11 }
-                                SpinBox { id: patience; width: parent.width; from: 0; to: 1000; value: 10; editable: true }
-                            }
                         }
                         LabeledField { id: learningSchedule; width: parent.width; label: "Learning-rate schedule (generation, rate pairs)"; text: "0, 0.002, 10, 0.0008" }
                         LabeledField { id: l2; width: parent.width; label: "L2 regularization"; text: "0.0004"; validator: DoubleValidator { bottom: 0 } }
 
-                        Text { text: "OPTIONAL PERFECT SOLVER"; color: ApplicationWindow.window.accentColor; font.pixelSize: 10; font.weight: Font.DemiBold; font.letterSpacing: 1 }
-                        LabeledField { id: solverPath; width: parent.width; label: "Solver executable"; text: App.solverPath; placeholderText: "Leave empty to skip scoring" }
-                        LabeledField { id: bookPath; width: parent.width; label: "Opening book"; text: App.bookPath }
-                        LabeledField { id: solutionsPath; width: parent.width; label: "Solution cache"; text: App.solutionsPath }
                     }
 
                     Row {
                         spacing: 10
                         Button { text: Jobs.active ? "Queue training" : "Start training"; highlighted: true; onClicked: page.submitTraining() }
-                        Text { anchors.verticalCenter: parent.verticalCenter; text: Jobs.active ? "This run will start after " + Jobs.currentTitle : "Artifacts are saved after each completed generation"; color: ApplicationWindow.window.mutedTextColor; font.pixelSize: 11 }
+                        Text { anchors.verticalCenter: parent.verticalCenter; text: Jobs.active ? "This run will start after " + Jobs.currentTitle : "Replay shards and candidates are saved atomically"; color: ApplicationWindow.window.mutedTextColor; font.pixelSize: 11 }
                     }
                 }
             }
@@ -198,6 +197,35 @@ Item {
                 Text { text: "TRAINING MONITOR"; color: ApplicationWindow.window.faintTextColor; font.pixelSize: 10; font.weight: Font.DemiBold; font.letterSpacing: 1 }
                 Text { text: Jobs.active ? Jobs.currentTitle : "No active job"; color: ApplicationWindow.window.textColor; font.pixelSize: 18; font.weight: Font.DemiBold; wrapMode: Text.WordWrap; Layout.fillWidth: true }
                 Text { text: Jobs.phase; color: Jobs.active ? ApplicationWindow.window.successColor : ApplicationWindow.window.mutedTextColor; font.pixelSize: 12 }
+                GridLayout {
+                    Layout.fillWidth: true
+                    columns: 2
+                    columnSpacing: 8
+                    rowSpacing: 8
+                    Repeater {
+                        model: [
+                            { label: "ACTOR", value: Jobs.liveTraining.actor },
+                            { label: "TRAINER", value: Jobs.liveTraining.trainer },
+                            { label: "ARENA", value: Jobs.liveTraining.arena },
+                            { label: "REPLAY", value: Jobs.liveTraining.replay },
+                            { label: "CHAMPION", value: Jobs.liveTraining.champion },
+                            { label: "CANDIDATE", value: Jobs.liveTraining.candidate }
+                        ]
+                        Rectangle {
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: 52
+                            radius: 8
+                            color: ApplicationWindow.window.inputColor
+                            Column {
+                                anchors.fill: parent
+                                anchors.margins: 8
+                                spacing: 3
+                                Text { text: modelData.label; color: ApplicationWindow.window.faintTextColor; font.pixelSize: 9; font.weight: Font.DemiBold }
+                                Text { width: parent.width; text: modelData.value; color: ApplicationWindow.window.textColor; font.pixelSize: 11; elide: Text.ElideRight }
+                            }
+                        }
+                    }
+                }
                 ProgressBar { Layout.fillWidth: true; from: 0; to: 1; value: Jobs.progress; indeterminate: Jobs.active && Jobs.progress <= 0 }
                 RowLayout {
                     Layout.fillWidth: true
@@ -206,7 +234,7 @@ Item {
                         Layout.fillWidth: true
                         Layout.minimumWidth: 0
                         Layout.preferredHeight: 40
-                        text: Jobs.stopAfterGenerationRequested ? "Stop scheduled" : (page.compact ? "Stop" : "Stop after generation")
+                        text: Jobs.stopAfterGenerationRequested ? "Stop scheduled" : (page.compact ? "Stop" : "Stop after candidate")
                         visible: Jobs.active && Jobs.currentKind === "training"
                         enabled: !Jobs.stopAfterGenerationRequested
                         onClicked: Jobs.stopAfterGeneration()

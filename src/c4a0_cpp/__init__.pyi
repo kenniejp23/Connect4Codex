@@ -17,6 +17,31 @@ class GameMetadata:
     @property
     def player1_id(self) -> int: ...
 
+class GameRequest:
+    def __init__(
+        self, metadata: GameMetadata, opening_moves: Sequence[int] = ...
+    ) -> None: ...
+    @property
+    def metadata(self) -> GameMetadata: ...
+    @property
+    def opening_moves(self) -> list[int]: ...
+
+class SelfPlayOptions:
+    def __init__(self) -> None: ...
+    max_nn_batch_size: int
+    n_mcts_iterations: int
+    c_exploration: float
+    c_ply_penalty: float
+    root_dirichlet_alpha: float
+    root_dirichlet_epsilon: float
+    temperature_midpoint_ply: int
+    temperature_cutoff_ply: int
+    early_temperature: float
+    middle_temperature: float
+    late_temperature: float
+    seed: int
+    worker_threads: int
+
 class GameSnapshot:
     @property
     def board(self) -> list[list[int]]: ...
@@ -68,6 +93,8 @@ class InteractivePlay:
     def close(self) -> None: ...
 
 class Sample:
+    @property
+    def ply(self) -> int: ...
     def flip_h(self) -> Sample: ...
     def to_numpy(
         self,
@@ -91,6 +118,7 @@ class PlayGamesResult:
     @property
     def results(self) -> list[GameResult]: ...
     def __add__(self, other: PlayGamesResult) -> PlayGamesResult: ...
+    def split_games(self, chunk_size: int) -> list[PlayGamesResult]: ...
     def split_train_test(
         self, train_frac: float, seed: int
     ) -> tuple[list[Sample], list[Sample]]: ...
@@ -109,6 +137,7 @@ EvalCallback = Callable[
     [int, NDArray[np.float32]],
     tuple[NDArray[np.float32], NDArray[np.float32], NDArray[np.float32]],
 ]
+SelfPlayTelemetryCallback = Callable[[dict[str, int | float | bool]], None]
 
 def play_games(
     reqs: Sequence[GameMetadata],
@@ -119,6 +148,14 @@ def play_games(
     py_eval_pos_cb: EvalCallback,
     progress_callback: Callable[[int, int], None] | None = None,
     cancelled_callback: Callable[[], bool] | None = None,
+) -> PlayGamesResult: ...
+def play_games_v2(
+    requests: Sequence[GameRequest],
+    options: SelfPlayOptions,
+    py_eval_pos_cb: EvalCallback,
+    progress_callback: Callable[[int, int], None] | None = None,
+    cancelled_callback: Callable[[], bool] | None = None,
+    telemetry_callback: SelfPlayTelemetryCallback | None = None,
 ) -> PlayGamesResult: ...
 def run_tui(
     py_eval_pos_cb: EvalCallback,

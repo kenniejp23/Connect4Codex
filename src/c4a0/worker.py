@@ -21,7 +21,7 @@ from c4a0.config import (
     NNSweepConfig,
     SolverScoreConfig,
     TournamentConfig,
-    TrainingConfig,
+    TrainingV2Config,
     ValidationConfig,
 )
 from c4a0.nn import ModelConfig
@@ -37,10 +37,15 @@ from c4a0.tournament import (
 )
 from c4a0.training import (
     SolverConfig,
-    TrainingCancelled,
     TrainingGen,
-    parse_lr_schedule,
     training_loop,
+)
+from c4a0.training_common import TrainingCancelled, parse_lr_schedule
+from c4a0.training_v2 import (
+    is_v2_run,
+    load_attempt_model,
+    load_champion_model,
+    run_async_training,
 )
 
 
@@ -78,61 +83,37 @@ def _listen_for_commands() -> None:
         command = message.get("command")
         if command == "stop_after_generation":
             _stop_after_generation.set()
-            emit("log", level="INFO", message="Will stop after the current generation")
+            emit(
+                "log",
+                level="INFO",
+                message="Will stop after the current candidate decision",
+            )
 
 
 def run_training(data: dict[str, Any]) -> dict[str, Any]:
-    config = TrainingConfig.model_validate(data)
-    model_config = ModelConfig(
-        n_residual_blocks=config.n_residual_blocks,
-        conv_filter_size=config.conv_filter_size,
-        n_policy_layers=config.n_policy_layers,
-        n_value_layers=config.n_value_layers,
-        lr_schedule=parse_lr_schedule(config.lr_schedule),
-        l2_reg=config.l2_reg,
-    )
-    solver_config = None
-    if config.solver_path and config.book_path:
-        solver_config = SolverConfig(
-            solver_path=config.solver_path,
-            book_path=config.book_path,
-            solutions_path=config.solutions_path,
-        )
+    config = TrainingV2Config.model_validate(data)
 
     def on_progress(phase: str, payload: dict[str, Any]) -> None:
-        emit("phase", name=phase, **payload)
+        clean_payload = {key: value for key, value in payload.items() if key != "type"}
+        emit("phase", name=phase, **clean_payload)
         current = payload.get("current")
         total = payload.get("total")
+        if current is None:
+            current = payload.get("completed_games")
+        if total is None:
+            total = payload.get("total_games")
         if current is not None and total:
             emit("progress", current=current, total=total, fraction=current / total)
         for key, value in payload.get("metrics", {}).items():
             emit("metric", name=key, value=value)
 
-    generation = training_loop(
-        base_dir=config.base_dir,
-        device=torch.device(config.device),
-        n_self_play_games=config.n_self_play_games,
-        n_mcts_iterations=config.n_mcts_iterations,
-        c_exploration=config.c_exploration,
-        c_ply_penalty=config.c_ply_penalty,
-        self_play_batch_size=config.self_play_batch_size,
-        training_batch_size=config.training_batch_size,
-        model_config=model_config,
-        max_gens=config.max_gens,
-        solver_config=solver_config,
-        max_epochs=config.max_epochs,
-        early_stopping_patience=config.early_stopping_patience,
+    result = run_async_training(
+        config,
         progress_callback=on_progress,
         should_cancel=_cancelled.is_set,
-        should_stop_after_generation=_stop_after_generation.is_set,
-        enable_progress_bar=False,
-        enable_model_summary=False,
+        should_stop_after_candidate=_stop_after_generation.is_set,
     )
-    return {
-        "generation": generation.gen_n,
-        "val_loss": generation.val_loss,
-        "solver_score": generation.solver_score,
-    }
+    return result
 
 
 def run_score(data: dict[str, Any]) -> dict[str, Any]:
@@ -190,21 +171,33 @@ def _load_tournament_player(
     elif spec == "uniform":
         player = UniformPlayer(identifier)
     else:
-        generations = TrainingGen.load_all(base_dir)
-        if not generations:
-            raise FileNotFoundError(f"no trained generations in {base_dir}")
-        if spec == "latest":
-            generation = generations[0]
-        elif spec.startswith("gen:"):
-            requested = int(spec.removeprefix("gen:"))
-            generation = next(
-                (item for item in generations if item.gen_n == requested), None
-            )
-            if generation is None:
-                raise ValueError(f"generation {requested} was not found")
+        if is_v2_run(base_dir):
+            if spec == "latest":
+                model = load_champion_model(base_dir)
+            elif spec.startswith("gen:"):
+                requested = int(spec.removeprefix("gen:"))
+                model = load_attempt_model(base_dir, requested)
+            else:
+                raise ValueError(f"unrecognized tournament player: {spec}")
+            player = ModelPlayer(identifier, model, device=device)
         else:
-            raise ValueError(f"unrecognized tournament player: {spec}")
-        player = ModelPlayer(identifier, generation.get_model(base_dir), device=device)
+            generations = TrainingGen.load_all(base_dir)
+            if not generations:
+                raise FileNotFoundError(f"no trained generations in {base_dir}")
+            if spec == "latest":
+                generation = generations[0]
+            elif spec.startswith("gen:"):
+                requested = int(spec.removeprefix("gen:"))
+                generation = next(
+                    (item for item in generations if item.gen_n == requested), None
+                )
+                if generation is None:
+                    raise ValueError(f"generation {requested} was not found")
+            else:
+                raise ValueError(f"unrecognized tournament player: {spec}")
+            player = ModelPlayer(
+                identifier, generation.get_model(base_dir), device=device
+            )
     player.name = PlayerName(spec)
     return player
 

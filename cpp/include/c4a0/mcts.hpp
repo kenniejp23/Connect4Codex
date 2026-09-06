@@ -29,9 +29,14 @@ class MctsGame {
   [[nodiscard]] Position leaf_position() const;
   [[nodiscard]] ModelId leaf_model_id_to_play() const;
   void receive_evaluation(Policy policy_logits, QValue q_penalty, QValue q_no_penalty,
-                          float c_exploration, float c_ply_penalty);
+                          float c_exploration, float c_ply_penalty,
+                          float root_dirichlet_alpha = 0.0F,
+                          float root_dirichlet_epsilon = 0.0F,
+                          std::uint64_t noise_seed = 0);
+  void add_root_dirichlet_noise(float alpha, float epsilon, float c_exploration,
+                                std::uint64_t noise_seed);
   void make_move(Move move, float c_exploration);
-  void make_random_move(float c_exploration, float temperature);
+  void make_random_move(float c_exploration, float temperature, std::uint64_t seed = 0);
   void reset();
   [[nodiscard]] bool undo();
   [[nodiscard]] std::size_t root_visit_count() const;

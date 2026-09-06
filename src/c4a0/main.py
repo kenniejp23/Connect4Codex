@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 
 from enum import Enum
+import json
 from pathlib import Path
 import sys
 
@@ -23,16 +24,35 @@ from c4a0.config import (  # noqa: E402
     NNSweepConfig,
     SolverScoreConfig,
     TrainingConfig,
+    TrainingV2Config,
 )
 from c4a0.sweep import perform_hparam_sweep_config  # noqa: E402
 from c4a0.tournament import ModelID, RandomPlayer, UniformPlayer  # noqa: E402
 from c4a0.training import (  # noqa: E402
     SolverConfig,
     TrainingGen,
-    parse_lr_schedule,
     training_loop,
 )
+from c4a0.training_common import parse_lr_schedule  # noqa: E402
+from c4a0.training_benchmark import (  # noqa: E402
+    TrainingBenchmarkConfig,
+    compare_training_benchmarks,
+    load_benchmark_report,
+    run_training_benchmark,
+    write_benchmark_report,
+)
+from c4a0.minimax_harness import (  # noqa: E402
+    MinimaxHarnessConfig,
+    evaluate_minimax_ladder,
+)
 from c4a0.utils import get_torch_device  # noqa: E402
+from c4a0.training_v2 import (  # noqa: E402
+    is_v2_run,
+    load_champion_model,
+    load_model_checkpoint,
+    run_async_training,
+    training_status,
+)
 
 import c4a0_cpp  # noqa: E402
 
@@ -43,6 +63,12 @@ class GameMode(str, Enum):
     human_ai = "human-ai"
     human_human = "human-human"
     ai_ai = "ai-ai"
+
+
+class TrainingPrecision(str, Enum):
+    auto = "auto"
+    mixed16 = "16-mixed"
+    true32 = "32-true"
 
 
 class HumanSide(str, Enum):
@@ -64,8 +90,8 @@ def gui():
     raise typer.Exit(run_gui())
 
 
-@app.command()
-def train(
+@app.command("train-legacy")
+def train_legacy(
     base_dir: str = "training",
     device: str = str(get_torch_device()),
     # These parameters were chosen based on the results of the nn_sweep and mcts_sweep
@@ -151,8 +177,238 @@ def train(
 
 
 @app.command()
+def train(
+    base_dir: str = "training-v2",
+    device: str = str(get_torch_device()),
+    run_seed: int = 1337,
+    n_mcts_iterations: int = 1400,
+    c_exploration: float = 6.6,
+    c_ply_penalty: float = 0.01,
+    mcts_value_scale: float = 0.0,
+    value_loss_weight: float = 0.0,
+    self_play_shard_games: int = 256,
+    self_play_batch_games: int = 512,
+    replay_capacity_games: int = 20_000,
+    replay_warmup_games: int = 2_048,
+    replay_ratio: float = 4.0,
+    validation_fraction: float = 0.05,
+    archive_depth: int = 8,
+    champion_self_play_weight: float = 0.65,
+    archive_weight: float = 0.30,
+    uniform_weight: float = 0.025,
+    random_weight: float = 0.025,
+    archive_recency: float = 0.7,
+    training_batch_size: int = 512,
+    inference_batch_size: int = 128,
+    data_loader_workers: int = 2,
+    mcts_worker_threads: int = 0,
+    precision: TrainingPrecision = TrainingPrecision.auto,
+    inference_amp_min_batch_size: int = 96,
+    n_residual_blocks: int = 1,
+    conv_filter_size: int = 32,
+    n_policy_layers: int = 4,
+    n_value_layers: int = 2,
+    lr_schedule: List[float] = [0, 2e-3, 10, 8e-4],
+    l2_reg: float = 4e-4,
+    max_gens: Optional[int] = None,
+    max_candidate_attempts: Optional[int] = None,
+    arena_min_games: int = 40,
+    arena_max_games: int = 800,
+    arena_p0: float = 0.50,
+    arena_p1: float = 0.55,
+    arena_alpha: float = 0.05,
+    arena_beta: float = 0.05,
+    arena_pair_batch_size: int = 100,
+    root_dirichlet_epsilon: float = 0.25,
+    root_dirichlet_alpha: float = 0.30,
+    temperature_cutoff_ply: int = 8,
+    early_temperature: float = 1.0,
+    late_temperature: float = 0.0,
+    validation_interval_steps: int = 100,
+    validation_batches: int = 8,
+    rejected_weight_retention: int = 3,
+    learner_incumbent_min_score: float = 0.5,
+    debt_pause_shards: int = 2,
+    debt_resume_shards: int = 1,
+):
+    """Train asynchronously with replay, a neural opponent league, and gating."""
+    config = TrainingV2Config(
+        base_dir=base_dir,
+        device=device,
+        run_seed=run_seed,
+        n_mcts_iterations=n_mcts_iterations,
+        c_exploration=c_exploration,
+        c_ply_penalty=c_ply_penalty,
+        mcts_value_scale=mcts_value_scale,
+        value_loss_weight=value_loss_weight,
+        self_play_shard_games=self_play_shard_games,
+        self_play_batch_games=self_play_batch_games,
+        replay_capacity_games=replay_capacity_games,
+        replay_warmup_games=replay_warmup_games,
+        replay_ratio=replay_ratio,
+        validation_fraction=validation_fraction,
+        archive_depth=archive_depth,
+        champion_self_play_weight=champion_self_play_weight,
+        archive_weight=archive_weight,
+        uniform_weight=uniform_weight,
+        random_weight=random_weight,
+        archive_recency=archive_recency,
+        training_batch_size=training_batch_size,
+        inference_batch_size=inference_batch_size,
+        data_loader_workers=data_loader_workers,
+        mcts_worker_threads=mcts_worker_threads,
+        precision=precision.value,
+        inference_amp_min_batch_size=inference_amp_min_batch_size,
+        n_residual_blocks=n_residual_blocks,
+        conv_filter_size=conv_filter_size,
+        n_policy_layers=n_policy_layers,
+        n_value_layers=n_value_layers,
+        lr_schedule=lr_schedule,
+        l2_reg=l2_reg,
+        max_gens=max_gens,
+        max_candidate_attempts=max_candidate_attempts,
+        arena_min_games=arena_min_games,
+        arena_max_games=arena_max_games,
+        arena_p0=arena_p0,
+        arena_p1=arena_p1,
+        arena_alpha=arena_alpha,
+        arena_beta=arena_beta,
+        arena_pair_batch_size=arena_pair_batch_size,
+        root_dirichlet_epsilon=root_dirichlet_epsilon,
+        root_dirichlet_alpha=root_dirichlet_alpha,
+        temperature_cutoff_ply=temperature_cutoff_ply,
+        early_temperature=early_temperature,
+        late_temperature=late_temperature,
+        validation_interval_steps=validation_interval_steps,
+        validation_batches=validation_batches,
+        rejected_weight_retention=rejected_weight_retention,
+        learner_incumbent_min_score=learner_incumbent_min_score,
+        debt_pause_shards=debt_pause_shards,
+        debt_resume_shards=debt_resume_shards,
+    )
+    result = run_async_training(config)
+    logger.info("Training stopped: {}", result)
+
+
+@app.command("training-status")
+def training_status_command(base_dir: str = "training-v2"):
+    """Show champion, pending candidate, and replay state for a V2 run."""
+    typer.echo(json.dumps(training_status(base_dir), indent=2))
+
+
+@app.command("minimax-test")
+def minimax_test(
+    base_dir: str = "training-v2",
+    model_path: Optional[str] = None,
+    device: str = str(get_torch_device()),
+    games_per_level: int = 20,
+    pair_batch_size: int = 6,
+    max_depth: int = 42,
+    mcts_iterations: int = 64,
+    inference_batch_size: int = 128,
+    c_exploration: float = 1.4,
+    c_ply_penalty: float = 0.01,
+    worker_threads: int = 0,
+    seed: int = 1337,
+):
+    """Test a model against random and successively deeper minimax opponents."""
+    model = (
+        load_model_checkpoint(model_path)
+        if model_path is not None
+        else load_champion_model(base_dir)
+    )
+    config = MinimaxHarnessConfig(
+        games_per_level=games_per_level,
+        pair_batch_size=pair_batch_size,
+        max_depth=max_depth,
+        mcts_iterations=mcts_iterations,
+        inference_batch_size=inference_batch_size,
+        c_exploration=c_exploration,
+        c_ply_penalty=c_ply_penalty,
+        worker_threads=worker_threads,
+        seed=seed,
+    )
+
+    def report(snapshot: dict[str, object]) -> None:
+        logger.info(
+            "{}: {}/{} games, {} points",
+            snapshot["opponent"],
+            snapshot["completed_games"],
+            snapshot["total_games"],
+            snapshot["points"],
+        )
+
+    result = evaluate_minimax_ladder(model, torch.device(device), config, report)
+    typer.echo(json.dumps(result.to_dict(), indent=2))
+
+
+@app.command("benchmark-training")
+def benchmark_training(
+    output: str,
+    workflow: str = "v2",
+    device: str = "cpu",
+    games: int = 64,
+    arena_games: int = 32,
+    mcts_iterations: int = 64,
+    inference_batch_size: int = 64,
+    training_batch_size: int = 128,
+    training_steps: int = 25,
+    repeats: int = 3,
+    mcts_worker_threads: int = 0,
+    precision: TrainingPrecision = TrainingPrecision.auto,
+    inference_amp_min_batch_size: int = 96,
+    solver_path: Optional[str] = None,
+    book_path: Optional[str] = None,
+    solver_cache_path: str = "benchmark-solutions.sqlite3",
+):
+    """Benchmark the fixed end-to-end V2 or frozen legacy Rust workflow."""
+    config = TrainingBenchmarkConfig(
+        workflow=workflow,  # type: ignore[arg-type]
+        device=device,
+        games=games,
+        arena_games=arena_games,
+        mcts_iterations=mcts_iterations,
+        inference_batch_size=inference_batch_size,
+        training_batch_size=training_batch_size,
+        training_steps=training_steps,
+        repeats=repeats,
+        mcts_worker_threads=mcts_worker_threads,
+        precision=precision.value,
+        inference_amp_min_batch_size=inference_amp_min_batch_size,
+        solver_path=solver_path,
+        book_path=book_path,
+        solver_cache_path=solver_cache_path,
+    )
+    report = run_training_benchmark(config)
+    write_benchmark_report(report, output)
+    typer.echo(json.dumps(report, indent=2))
+
+
+@app.command("compare-training-benchmarks")
+def compare_benchmarks(
+    v2_report: str,
+    legacy_rust_report: str,
+    output: Optional[str] = None,
+    throughput_ratio: float = 0.9,
+    latency_ratio: float = 1.1,
+):
+    """Apply the fail-closed V2 replacement gate to two benchmark reports."""
+    comparison = compare_training_benchmarks(
+        load_benchmark_report(v2_report),
+        load_benchmark_report(legacy_rust_report),
+        throughput_ratio,
+        latency_ratio,
+    )
+    if output is not None:
+        write_benchmark_report(comparison, output)
+    typer.echo(json.dumps(comparison, indent=2))
+    if not comparison["replacement_approved"]:
+        raise typer.Exit(2)
+
+
+@app.command()
 def play(
-    base_dir: str = "training",
+    base_dir: str = "training-v2",
     max_mcts_iters: int = 1400,
     c_exploration: float = 6.6,
     c_ply_penalty: float = 0.01,
@@ -161,9 +417,12 @@ def play(
     human_side: HumanSide = HumanSide.red,
 ):
     """Play against the AI, another human, or watch an AI-vs-AI game."""
-    gen = TrainingGen.load_latest(base_dir)
     if model is PlayModel.best:
-        nn = gen.get_model(base_dir)
+        nn = (
+            load_champion_model(base_dir)
+            if is_v2_run(base_dir)
+            else TrainingGen.load_latest(base_dir).get_model(base_dir)
+        )
         nn.eval()
     elif model is PlayModel.random:
         nn = RandomPlayer(ModelID(0))

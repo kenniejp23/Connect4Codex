@@ -78,6 +78,18 @@ class CountingEvaluator final : public Evaluator {
   std::atomic<std::size_t> calls{};
 };
 
+class RightBiasedEvaluator final : public Evaluator {
+ public:
+  std::vector<EvalPosResult> evaluate(ModelId,
+                                      const std::vector<Position>& positions) override {
+    Policy policy{};
+    policy[kCols - 1] = 20.0F;
+    return std::vector<EvalPosResult>(
+        positions.size(),
+        EvalPosResult{.policy = policy, .q_penalty = 0.0F, .q_no_penalty = 0.0F});
+  }
+};
+
 class ThrowingEvaluator final : public Evaluator {
  public:
   std::vector<EvalPosResult> evaluate(ModelId, const std::vector<Position>&) override {
@@ -157,6 +169,49 @@ TEST_CASE("self-play batches unique leaves and produces complete games") {
   std::sort(game_ids.begin(), game_ids.end());
   const std::vector<std::uint64_t> expected_game_ids{1, 2, 3};
   CHECK(game_ids == expected_game_ids);
+}
+
+TEST_CASE("V2 self-play validates openings and becomes greedy at the cutoff") {
+  RightBiasedEvaluator evaluator;
+  const std::vector<Move> opening{0, 1, 0, 1, 2, 3, 2, 3};
+  SelfPlayOptions options{.max_nn_batch_size = 2,
+                          .n_mcts_iterations = 16,
+                          .c_exploration = 1.0F,
+                          .c_ply_penalty = 0.01F,
+                          .root_dirichlet_alpha = 0.3F,
+                          .root_dirichlet_epsilon = 0.0F,
+                          .temperature_midpoint_ply = 8,
+                          .temperature_cutoff_ply = 8,
+                          .early_temperature = 1.0F,
+                          .middle_temperature = 1.0F,
+                          .late_temperature = 0.0F,
+                          .seed = 9,
+                          .worker_threads = 1};
+  const auto results = self_play(
+      evaluator,
+      {GameRequest{GameMetadata{.game_id = 17, .player0_id = 3, .player1_id = 7},
+                   opening}},
+      options);
+
+  REQUIRE(results.size() == 1);
+  REQUIRE(results.front().samples.size() >= 2);
+  CHECK(results.front().metadata.player0_id == 3);
+  CHECK(results.front().metadata.player1_id == 7);
+  CHECK(results.front().samples.front().pos == Position::from_moves(opening));
+  const auto expected = Position::from_moves(opening).make_move(kCols - 1);
+  REQUIRE(expected.has_value());
+  CHECK(results.front().samples[1].pos == *expected);
+
+  CHECK_THROWS_AS(
+      self_play(evaluator,
+                {GameRequest{GameMetadata{.game_id = 18}, {0, 1, 0, 1, 0, 1, 0}}},
+                options),
+      std::invalid_argument);
+  CHECK_THROWS_AS(
+      self_play(evaluator,
+                {GameRequest{GameMetadata{.game_id = 19}, {0, 0, 0, 0, 0, 0, 0}}},
+                options),
+      std::invalid_argument);
 }
 
 TEST_CASE("self-play cancels every worker and propagates evaluator failures") {

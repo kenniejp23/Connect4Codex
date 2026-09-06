@@ -38,12 +38,15 @@ def test_public_api_and_numpy_contract():
         "N_COLS",
         "N_ROWS",
         "GameMetadata",
+        "GameRequest",
         "GameSnapshot",
         "GameResult",
         "InteractivePlay",
         "PlayGamesResult",
         "Sample",
+        "SelfPlayOptions",
         "play_games",
+        "play_games_v2",
         "run_tui",
     }
     assert set(c4a0_cpp.__all__) == expected_exports
@@ -63,6 +66,7 @@ def test_public_api_and_numpy_contract():
     games = _small_games()
     sample = games.results[0].samples[0]
     position, policy, q_penalty, q_no_penalty = sample.to_numpy()
+    assert sample.ply >= 0
     assert position.shape == (2, 6, 7)
     assert policy.shape == (7,)
     assert q_penalty.shape == ()
@@ -218,6 +222,30 @@ def test_self_play_progress_and_cancellation_callbacks():
             None,
             lambda: True,
         )
+
+
+def test_v2_self_play_reports_live_mcts_and_queue_telemetry():
+    options = c4a0_cpp.SelfPlayOptions()
+    options.max_nn_batch_size = 4
+    options.n_mcts_iterations = 2
+    options.c_exploration = 4.0
+    options.c_ply_penalty = 0.01
+    options.worker_threads = 1
+    snapshots = []
+    requests = [
+        c4a0_cpp.GameRequest(c4a0_cpp.GameMetadata(index, 0, 0), [])
+        for index in range(4)
+    ]
+    games = c4a0_cpp.play_games_v2(
+        requests, options, _uniform_eval, None, None, snapshots.append
+    )
+    assert len(games.results) == 4
+    assert snapshots[-1]["final"] is True
+    assert snapshots[-1]["completed_games"] == 4
+    assert snapshots[-1]["mcts_iterations"] > 0
+    assert snapshots[-1]["neural_evaluations"] > 0
+    assert snapshots[-1]["neural_queue_depth"] == 0
+    assert snapshots[-1]["mcts_queue_depth"] == 0
 
 
 def test_one_iteration_self_play_never_samples_a_full_column():

@@ -18,6 +18,25 @@ from c4a0.training import TrainingGen
 from c4a0.tournament import ModelID, ModelPlayer, RandomPlayer, UniformPlayer
 from c4a0.utils import get_torch_device
 from c4a0.gui.jobs import JobManager
+from c4a0.training_v2 import (
+    is_v2_run,
+    list_attempts,
+    load_attempt_model,
+    load_champion_model,
+    training_status,
+)
+
+
+def _configured_training_dir(settings: QSettings) -> str:
+    """Migrate the former GUI default once, without blocking explicit legacy use."""
+    migration_key = "migrations/trainingV2Default"
+    configured = str(settings.value("paths/training", "training-v2"))
+    if not settings.value(migration_key, False, type=bool):
+        if configured.strip() in {"", "training", "./training"}:
+            configured = "training-v2"
+            settings.setValue("paths/training", configured)
+        settings.setValue(migration_key, True)
+    return configured
 
 
 class AppController(QObject):
@@ -27,7 +46,7 @@ class AppController(QObject):
         super().__init__(parent)
         self._settings = QSettings("c4a0", "c4a0")
         self._page = int(str(self._settings.value("navigation/page", 0)))
-        self._training_dir = str(self._settings.value("paths/training", "training"))
+        self._training_dir = _configured_training_dir(self._settings)
         self._solver_path = str(self._settings.value("paths/solver", ""))
         self._book_path = str(self._settings.value("paths/book", ""))
         self._solutions_path = str(
@@ -50,6 +69,19 @@ class AppController(QObject):
     @Property(str, notify=changed)
     def trainingDir(self) -> str:
         return self._training_dir
+
+    @Property(bool, notify=changed)
+    def trainingV2(self) -> bool:
+        if is_v2_run(self._training_dir):
+            return True
+        try:
+            return not TrainingGen.load_all(self._training_dir)
+        except Exception:
+            return True
+
+    @Property(str, notify=changed)
+    def modelCollectionName(self) -> str:
+        return "attempts" if self.trainingV2 else "generations"
 
     @Property(str, notify=changed)
     def solverPath(self) -> str:
@@ -91,12 +123,17 @@ class AppController(QObject):
     def latestGeneration(self) -> str:
         if not self._generations:
             return "No trained model"
-        return f"Generation {self._generations[0]['generation']}"
+        champion = next(
+            (item for item in self._generations if item.get("isChampion")),
+            self._generations[0],
+        )
+        return f"Champion {champion['generation']}"
 
     @Property(list, notify=changed)
     def playerOptions(self) -> list[str]:
         options = ["Human", "Latest Model"]
-        options.extend(f"Generation {item['generation']}" for item in self._generations)
+        label = "Attempt" if self.trainingV2 else "Generation"
+        options.extend(f"{label} {item['generation']}" for item in self._generations)
         options.extend(["Random", "Uniform"])
         return options
 
@@ -112,7 +149,7 @@ class AppController(QObject):
 
     @Slot(str)
     def setTrainingDir(self, path: str) -> None:
-        normalized = path.strip() or "training"
+        normalized = path.strip() or "training-v2"
         if normalized == self._training_dir:
             return
         self._training_dir = normalized
@@ -143,6 +180,26 @@ class AppController(QObject):
 
     @Slot()
     def refreshGenerations(self) -> None:
+        if is_v2_run(self._training_dir):
+            try:
+                self._generations = [
+                    {
+                        "generation": int(item["attempt_n"]),
+                        "created": str(item["created_at"])[:16].replace("T", " "),
+                        "valLoss": item["val_loss"],
+                        "solverScore": None,
+                        "mctsIterations": 0,
+                        "exploration": 0.0,
+                        "status": item["status"],
+                        "isChampion": item["is_champion"],
+                    }
+                    for item in list_attempts(self._training_dir)
+                    if Path(item["checkpoint_path"]).is_file()
+                ]
+            except Exception:
+                self._generations = []
+            self.changed.emit()
+            return
         try:
             generations = TrainingGen.load_all(self._training_dir)
         except (FileNotFoundError, NotADirectoryError):
@@ -164,7 +221,8 @@ class AppController(QObject):
 
     @Slot(int)
     def useGenerationInPlay(self, generation_number: int) -> None:
-        option = f"Generation {generation_number}"
+        label = "Attempt" if self.trainingV2 else "Generation"
+        option = f"{label} {generation_number}"
         if not any(
             item["generation"] == generation_number for item in self._generations
         ):
@@ -175,6 +233,17 @@ class AppController(QObject):
     @Slot(int, result=str)
     def generationStats(self, generation_number: int) -> str:
         try:
+            if is_v2_run(self._training_dir):
+                attempt = next(
+                    item
+                    for item in list_attempts(self._training_dir)
+                    if int(item["attempt_n"]) == generation_number
+                )
+                return json.dumps(
+                    {"attempt": attempt, "run": training_status(self._training_dir)},
+                    indent=2,
+                    default=str,
+                )
             generation = next(
                 item
                 for item in TrainingGen.load_all(self._training_dir)
@@ -342,6 +411,15 @@ class GameController(QObject):
             return UniformPlayer(identifier)
         if spec == "Random":
             return RandomPlayer(identifier)
+        if is_v2_run(self._app._training_dir):
+            if spec == "Latest Model":
+                model = load_champion_model(self._app._training_dir)
+            elif spec.startswith(("Attempt ", "Generation ")):
+                number = int(spec.split(maxsplit=1)[1])
+                model = load_attempt_model(self._app._training_dir, number)
+            else:
+                raise ValueError(f"Unknown player type: {spec}")
+            return ModelPlayer(identifier, model, torch.device(self._app._device))
         generations = TrainingGen.load_all(self._app._training_dir)
         if not generations:
             raise FileNotFoundError(

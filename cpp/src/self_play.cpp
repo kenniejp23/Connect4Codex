@@ -129,9 +129,14 @@ class BoundedQueue {
     not_full_.notify_all();
   }
 
+  [[nodiscard]] std::size_t size() const noexcept {
+    std::lock_guard lock(mutex_);
+    return size_;
+  }
+
  private:
   const std::size_t capacity_;
-  std::mutex mutex_;
+  mutable std::mutex mutex_;
   std::condition_variable not_empty_;
   std::condition_variable not_full_;
   std::vector<std::optional<T>> slots_;
@@ -143,9 +148,10 @@ class BoundedQueue {
 
 class Progress {
  public:
-  explicit Progress(std::size_t total_games)
-      : enabled_(::isatty(STDERR_FILENO) != 0),
+  explicit Progress(std::size_t total_games, SelfPlayTelemetryCallback callback)
+      : enabled_(::isatty(STDERR_FILENO) != 0 || static_cast<bool>(callback)),
         total_games_(total_games),
+        callback_(std::move(callback)),
         started_(std::chrono::steady_clock::now()),
         last_render_(started_) {}
 
@@ -154,7 +160,7 @@ class Progress {
       return;
     }
     const auto value = neural_evaluations_.fetch_add(count) + count;
-    if ((value & 0xffU) == 0U) {
+    if ((value & 0x3fU) == 0U) {
       render(false);
     }
   }
@@ -164,7 +170,7 @@ class Progress {
       return;
     }
     const auto value = mcts_iterations_.fetch_add(1) + 1;
-    if ((value & 0x3ffU) == 0U) {
+    if ((value & 0xffU) == 0U) {
       render(false);
     }
   }
@@ -174,7 +180,12 @@ class Progress {
       return;
     }
     games_finished_.fetch_add(1);
-    render(false);
+    render(false, true);
+  }
+
+  void queue_depths(std::size_t neural, std::size_t mcts) noexcept {
+    neural_queue_depth_.store(neural);
+    mcts_queue_depth_.store(mcts);
   }
 
   void finish() noexcept {
@@ -182,38 +193,58 @@ class Progress {
       return;
     }
     try {
-      render(true);
+      render(true, true);
     } catch (...) {
       // Progress reporting must never affect self-play.
     }
   }
 
  private:
-  void render(bool final) {
+  void render(bool final, bool force = false) {
     const auto now = std::chrono::steady_clock::now();
     std::lock_guard lock(render_mutex_);
-    if (!final && now - last_render_ < std::chrono::milliseconds(100)) {
+    if (!final && !force && now - last_render_ < std::chrono::milliseconds(100)) {
       return;
     }
     last_render_ = now;
-    const auto elapsed =
-        std::chrono::duration_cast<std::chrono::seconds>(now - started_).count();
-    std::cerr << '\r' << "self-play " << games_finished_.load() << '/' << total_games_
-              << " games, " << neural_evaluations_.load() << " NN evals, "
-              << mcts_iterations_.load() << " MCTS iterations [" << elapsed << "s]";
-    if (final) {
-      std::cerr << '\n';
+    const auto elapsed = std::chrono::duration<double>(now - started_).count();
+    const SelfPlayTelemetry snapshot{
+        .completed_games = games_finished_.load(),
+        .total_games = total_games_,
+        .neural_evaluations = neural_evaluations_.load(),
+        .mcts_iterations = mcts_iterations_.load(),
+        .neural_queue_depth = neural_queue_depth_.load(),
+        .mcts_queue_depth = mcts_queue_depth_.load(),
+        .elapsed_seconds = elapsed,
+        .final = final,
+    };
+    if (::isatty(STDERR_FILENO) != 0) {
+      std::cerr << '\r' << "self-play " << snapshot.completed_games << '/'
+                << snapshot.total_games << " games, " << snapshot.neural_evaluations
+                << " NN evals, " << snapshot.mcts_iterations
+                << " MCTS iterations, q=" << snapshot.neural_queue_depth << '/'
+                << snapshot.mcts_queue_depth << " ["
+                << static_cast<std::size_t>(elapsed) << "s]";
+      if (final) {
+        std::cerr << '\n';
+      }
+      std::cerr.flush();
     }
-    std::cerr.flush();
+    if (callback_) {
+      callback_(snapshot);
+    }
   }
 
   const bool enabled_;
   const std::size_t total_games_;
+  SelfPlayTelemetryCallback callback_;
   const std::chrono::steady_clock::time_point started_;
   std::chrono::steady_clock::time_point last_render_;
   std::atomic<std::size_t> games_finished_{};
   std::atomic<std::size_t> neural_evaluations_{};
   std::atomic<std::size_t> mcts_iterations_{};
+  std::atomic<std::size_t> neural_queue_depth_{};
+  std::atomic<std::size_t> mcts_queue_depth_{};
   std::mutex render_mutex_;
 };
 
@@ -259,16 +290,54 @@ std::vector<GameResult> self_play(Evaluator& evaluator,
                                   float c_ply_penalty,
                                   SelfPlayProgressCallback progress_callback,
                                   CancellationCallback cancelled_callback) {
+  std::vector<GameRequest> game_requests;
+  game_requests.reserve(requests.size());
+  for (const auto& metadata : requests) {
+    game_requests.emplace_back(metadata);
+  }
+  return self_play(evaluator, std::move(game_requests),
+                   SelfPlayOptions{.max_nn_batch_size = max_nn_batch_size,
+                                   .n_mcts_iterations = n_mcts_iterations,
+                                   .c_exploration = c_exploration,
+                                   .c_ply_penalty = c_ply_penalty,
+                                   .root_dirichlet_alpha = 0.0F,
+                                   .root_dirichlet_epsilon = 0.0F,
+                                   .temperature_midpoint_ply = 4,
+                                   .temperature_cutoff_ply = 8,
+                                   .early_temperature = 4.0F,
+                                   .middle_temperature = 2.0F,
+                                   .late_temperature = 1.0F,
+                                   .seed = 0,
+                                   .worker_threads = 0},
+                   std::move(progress_callback), std::move(cancelled_callback));
+}
+
+std::vector<GameResult> self_play(Evaluator& evaluator,
+                                  std::vector<GameRequest> requests,
+                                  const SelfPlayOptions& options,
+                                  SelfPlayProgressCallback progress_callback,
+                                  CancellationCallback cancelled_callback,
+                                  SelfPlayTelemetryCallback telemetry_callback) {
   if (requests.empty()) {
     return {};
   }
-  if (max_nn_batch_size == 0) {
+  if (options.max_nn_batch_size == 0) {
     throw std::invalid_argument("max_nn_batch_size must be positive");
   }
-  if (n_mcts_iterations == 0) {
+  if (options.n_mcts_iterations == 0) {
     throw std::invalid_argument("n_mcts_iterations must be positive");
   }
-  if (!std::isfinite(c_exploration) || !std::isfinite(c_ply_penalty)) {
+  if (!std::isfinite(options.c_exploration) || !std::isfinite(options.c_ply_penalty) ||
+      !std::isfinite(options.root_dirichlet_alpha) ||
+      !std::isfinite(options.root_dirichlet_epsilon) ||
+      !std::isfinite(options.early_temperature) ||
+      !std::isfinite(options.middle_temperature) ||
+      !std::isfinite(options.late_temperature) || options.root_dirichlet_alpha < 0.0F ||
+      options.root_dirichlet_epsilon < 0.0F || options.root_dirichlet_epsilon > 1.0F ||
+      options.early_temperature < 0.0F || options.middle_temperature < 0.0F ||
+      options.late_temperature < 0.0F ||
+      options.temperature_midpoint_ply > options.temperature_cutoff_ply ||
+      (options.root_dirichlet_epsilon > 0.0F && options.root_dirichlet_alpha <= 0.0F)) {
     throw std::invalid_argument("MCTS coefficients must be finite");
   }
   const std::size_t game_count = requests.size();
@@ -282,7 +351,7 @@ std::vector<GameResult> self_play(Evaluator& evaluator,
   std::stop_source cancellation;
   std::mutex error_mutex;
   std::exception_ptr first_error;
-  Progress progress(game_count);
+  Progress progress(game_count, std::move(telemetry_callback));
 
   const auto close_queues = [&] {
     neural_queue.close();
@@ -302,11 +371,16 @@ std::vector<GameResult> self_play(Evaluator& evaluator,
   };
 
   const std::stop_token stop_token = cancellation.get_token();
-  for (const auto& metadata : requests) {
-    if (!neural_queue.push(MctsGame(Position{}, metadata), stop_token)) {
+  for (const auto& request : requests) {
+    const auto position = Position::from_moves(request.opening_moves);
+    if (position.terminal_state().has_value()) {
+      throw std::invalid_argument("self-play opening must be non-terminal");
+    }
+    if (!neural_queue.push(MctsGame(position, request.metadata), stop_token)) {
       throw std::runtime_error("failed to enqueue initial self-play game");
     }
   }
+  progress.queue_depths(neural_queue.size(), mcts_queue.size());
 
   std::jthread neural_thread;
   std::vector<std::jthread> mcts_threads;
@@ -328,6 +402,7 @@ std::vector<GameResult> self_play(Evaluator& evaluator,
             pending_games.push_back(std::move(*game));
           }
           neural_queue.drain_available(pending_games);
+          progress.queue_depths(neural_queue.size(), mcts_queue.size());
 
           std::map<ModelId, std::vector<Position>> positions_by_model;
           std::map<ModelId, std::unordered_set<Position>> seen_by_model;
@@ -356,8 +431,8 @@ std::vector<GameResult> self_play(Evaluator& evaluator,
 
           auto positions = positions_by_model.at(selected_model);
           std::sort(positions.begin(), positions.end(), position_less);
-          if (positions.size() > max_nn_batch_size) {
-            positions.resize(max_nn_batch_size);
+          if (positions.size() > options.max_nn_batch_size) {
+            positions.resize(options.max_nn_batch_size);
           }
 
           auto evaluations = evaluator.evaluate(selected_model, positions);
@@ -394,6 +469,7 @@ std::vector<GameResult> self_play(Evaluator& evaluator,
           if (!mcts_queue.push_batch(ready_jobs, stop_token)) {
             return;
           }
+          progress.queue_depths(neural_queue.size(), mcts_queue.size());
         }
       } catch (...) {
         fail(std::current_exception());
@@ -401,8 +477,14 @@ std::vector<GameResult> self_play(Evaluator& evaluator,
     });
 
     const unsigned int hardware_threads = std::thread::hardware_concurrency();
+    // MCTS work arrives in short bursts after each neural batch. More blocking
+    // workers than hardware threads reduce queue turnaround without consuming
+    // those cores continuously; cap at the number of games to avoid pointless
+    // threads for small interactive and test workloads.
+    const std::size_t automatic_workers = std::min<std::size_t>(
+        game_count, std::max<std::size_t>(1, hardware_threads * 6U));
     const std::size_t worker_count =
-        std::max<std::size_t>(1, hardware_threads > 1 ? hardware_threads - 1 : 1);
+        options.worker_threads > 0 ? options.worker_threads : automatic_workers;
     mcts_threads.reserve(worker_count);
     for (std::size_t worker = 0; worker < worker_count; ++worker) {
       mcts_threads.emplace_back([&](std::stop_token) {
@@ -417,31 +499,48 @@ std::vector<GameResult> self_play(Evaluator& evaluator,
             if (!job) {
               return;
             }
+            progress.queue_depths(neural_queue.size(), mcts_queue.size());
 
             job->game.receive_evaluation(
                 job->evaluation.policy, job->evaluation.q_penalty,
-                job->evaluation.q_no_penalty, c_exploration, c_ply_penalty);
+                job->evaluation.q_no_penalty, options.c_exploration,
+                options.c_ply_penalty, options.root_dirichlet_alpha,
+                options.root_dirichlet_epsilon,
+                options.seed ^ job->game.root_position().mask() ^
+                    (job->game.root_position().value() << 1U));
             progress.mcts_iteration();
 
-            if (job->game.root_visit_count() < n_mcts_iterations) {
+            if (job->game.root_visit_count() < options.n_mcts_iterations) {
               if (!neural_queue.push(std::move(job->game), stop_token)) {
                 return;
               }
+              progress.queue_depths(neural_queue.size(), mcts_queue.size());
               continue;
             }
 
             const Position root_position = job->game.root_position();
             if (!root_position.terminal_state().has_value()) {
               const std::size_t ply = root_position.ply();
-              const float temperature = ply < 4 ? 4.0F : (ply < 8 ? 2.0F : 1.0F);
-              job->game.make_random_move(c_exploration, temperature);
+              const float temperature = ply < options.temperature_midpoint_ply
+                                            ? options.early_temperature
+                                            : (ply < options.temperature_cutoff_ply
+                                                   ? options.middle_temperature
+                                                   : options.late_temperature);
+              job->game.make_random_move(options.c_exploration, temperature,
+                                         options.seed);
+              const auto next_root = job->game.root_position();
+              job->game.add_root_dirichlet_noise(
+                  options.root_dirichlet_alpha, options.root_dirichlet_epsilon,
+                  options.c_exploration,
+                  options.seed ^ next_root.mask() ^ (next_root.value() << 1U));
               if (!neural_queue.push(std::move(job->game), stop_token)) {
                 return;
               }
+              progress.queue_depths(neural_queue.size(), mcts_queue.size());
               continue;
             }
 
-            GameResult result = std::move(job->game).to_result(c_ply_penalty);
+            GameResult result = std::move(job->game).to_result(options.c_ply_penalty);
             {
               std::lock_guard lock(results_mutex);
               results.push_back(std::move(result));

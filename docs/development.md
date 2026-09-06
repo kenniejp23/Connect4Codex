@@ -120,48 +120,32 @@ Run the checked-in smoke task:
 mise run train:smoke
 ```
 
-The task runs a tiny CPU job equivalent to:
+The task runs the bounded process-level integration test. It creates a temporary V2 run, generates
+an atomic CBOR shard, trains from replay, submits a candidate, completes an arena decision, reloads
+the champion, and exits after that decision. No solver path is present in the V2 worker.
 
-```sh
-rm -rf training/ci-smoke
-uv run python src/c4a0/main.py train \
-  --base-dir training/ci-smoke \
-  --device cpu \
-  --n-self-play-games 4 \
-  --n-mcts-iterations 4 \
-  --self-play-batch-size 16 \
-  --training-batch-size 16 \
-  --n-residual-blocks 1 \
-  --conv-filter-size 8 \
-  --n-policy-layers 1 \
-  --n-value-layers 1 \
-  --lr-schedule 0 \
-  --lr-schedule 0.001 \
-  --l2-reg 0 \
-  --max-gens 1
-```
-
-Verified smoke runs in this environment:
-
-- generated 4 games
-- generated a generation 0 root model and a generation 1 trained model
-- produced self-play samples and unique-position counts in the training metadata/artifacts
-- saved `metadata.json`, `games.pkl`, and `model.pkl` for each generation
-- left `solver_score` as `null` because no external solver was configured
-
-Training artifacts are stored as timestamped generation directories:
+V2 artifacts use this layout:
 
 ```text
-training/<run-name>/<timestamp>/metadata.json
-training/<run-name>/<timestamp>/games.pkl
-training/<run-name>/<timestamp>/model.pkl
+training-v2/run.sqlite3
+training-v2/arena_openings.json
+training-v2/replay/*.cbor
+training-v2/attempts/<attempt>/model.pt
+training-v2/learner.pt
+training-v2/tensorboard/events.out.tfevents.*
 ```
 
-PyTorch Lightning logs are written to `lightning_logs/`.
+The coordinator is the only manifest writer. A staged shard is fsynced and atomically renamed
+before registration; whole old shards are retired only after the trainer releases them. Use
+`uv run c4a0 training-status --base-dir training-v2` for the champion, pending candidate, component
+progress, replay occupancy, and globally unique next game ID.
 
-## Inspect self-play stats
+Legacy timestamped `metadata.json`, `games.pkl`, and `model.pkl` generations are still supported by
+`train-legacy` and all playback/evaluation loaders.
 
-Use this after a training run:
+## Inspect legacy self-play stats
+
+Use this only for a `train-legacy` directory; V2 inspection uses `training-status`:
 
 ```sh
 mise exec -- uv run python - <<'PY'
@@ -188,35 +172,47 @@ PY
 
 ## Full/default training
 
-The README default is much larger and intended for a GPU-class machine:
+The defaults target the detected CUDA device and a 4 GB-class GPU:
 
 ```sh
-mise exec -- uv run python src/c4a0/main.py train --max-gens 10
+uv run c4a0 train --base-dir training-v2 --max-gens 10
 ```
 
 Useful knobs:
 
 - `--device cpu|cuda|mps`
-- `--n-self-play-games`
+- `--self-play-shard-games`
+- `--self-play-batch-games` (native concurrency; must be a whole multiple of the durable shard size)
 - `--n-mcts-iterations`
-- `--self-play-batch-size`
+- `--inference-batch-size`
+- `--mcts-worker-threads` (`0` uses the benchmarked native automatic setting)
+- `--precision auto|16-mixed|32-true`
+- `--inference-amp-min-batch-size`
 - `--training-batch-size`
+- `--replay-capacity-games`
+- `--replay-ratio`
+- `--arena-pair-batch-size`
+- `--max-candidate-attempts` (a bounded experiment/smoke safeguard)
 - `--base-dir`
-- `--max-gens`
+- `--max-gens` (accepted champions, not rejected attempts)
+
+The CUDA defaults were selected from the utilization and throughput sweeps documented in the
+[end-to-end training benchmark](training-benchmark.md). They intentionally optimize completed
+games and positions per second rather than maximizing the GPU percentage shown by `nvidia-smi`.
 
 ## Play against a model
 
-After training at least one generation:
+After the V2 run has its attempt-0 champion:
 
 ```sh
-mise exec -- uv run python src/c4a0/main.py play --base-dir training/ci-smoke --model best
+uv run c4a0 play --base-dir training-v2 --model best
 ```
 
 Other model options:
 
 ```sh
-mise exec -- uv run python src/c4a0/main.py play --model random
-mise exec -- uv run python src/c4a0/main.py play --model uniform
+uv run c4a0 play --model random
+uv run c4a0 play --model uniform
 ```
 
 This opens a terminal UI, so run it in an interactive terminal.
@@ -226,7 +222,7 @@ This opens a terminal UI, so run it in an interactive terminal.
 There is no web app dev server in this repo. The useful local servers are for experiment inspection:
 
 ```sh
-mise exec -- uv run tensorboard --logdir lightning_logs --port 6006
+uv run tensorboard --logdir training-v2/tensorboard --port 6006
 ```
 
 For Optuna sweeps:
@@ -238,6 +234,10 @@ mise exec -- uv run optuna-dashboard sqlite:///optuna.db
 ## Optional solver scoring
 
 The solver is optional and is not used for training. It scores generated policies against objective Connect Four solutions.
+
+For replacement decisions, use the reproducible [end-to-end training benchmark](training-benchmark.md).
+It compares V2 with the frozen sequential Rust workflow and deliberately fails closed when solver
+results or another required metric are absent.
 
 ```sh
 git clone https://github.com/PascalPons/connect4.git solver
@@ -272,7 +272,7 @@ The release gate covers:
 - `mise run typecheck`: Pyright passed with 0 errors
 - `mise run test:cpp`: runs native CTest unit and property tests
 - `mise run test:python`: Python API, training, tournament, and native-boundary tests
-- `mise run train:smoke`: runs end-to-end self-play + model training
+- `mise run train:smoke`: runs bounded asynchronous shard, replay, candidate, and arena training
 
 The terminal UI suite creates its own pseudo-terminal and verifies terminal restoration on both
 normal exit and evaluator failure.

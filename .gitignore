@@ -24,3 +24,12 @@ solver/
 
 skills-lock.json
 .agents/
+
+# Generated training state and benchmark runtime artifacts
+training-v2/
+benchmark-results/**/attempts/
+benchmark-results/**/replay/
+benchmark-results/**/tensorboard/
+benchmark-results/**/*.pt
+benchmark-results/**/*.sqlite3
+benchmark-results/**/*.sqlite3-*

@@ -45,11 +45,17 @@ The desktop UI provides mouse and keyboard play, live MCTS analysis, training an
 configuration, model/data inspection, tournaments, solver scoring, and developer validation. The
 existing terminal commands remain available.
 
-5. Train a network:
+5. Train a network with the asynchronous, neural-only V2 pipeline:
 
 ```sh
-uv run src/c4a0/main.py train --max-gens=10
+uv run c4a0 train --base-dir training-v2 --max-gens 10
+uv run c4a0 training-status --base-dir training-v2
 ```
+
+`train` creates or resumes only a V2 run. It overlaps self-play and replay training, evaluates
+candidates against the accepted champion with an SPRT arena gate, and uses accepted historical
+networks plus small random/uniform allocations for diversity. `--max-gens` counts newly accepted
+champions. The previous synchronous implementation remains available as `train-legacy`.
 
 6. Play against the network:
 
@@ -70,7 +76,7 @@ uv run src/c4a0/main.py play --model best --mode human-human
 uv run src/c4a0/main.py play --model best --mode ai-ai
 ```
 
-`--model` selects the evaluator used by MCTS: `best` loads the latest trained network, `random`
+`--model` selects the evaluator used by MCTS: `best` loads the accepted champion, `random`
 uses random policy logits, and `uniform` gives every legal move equal policy weight. `B` plays the
 current best searched move immediately, while `R` samples a move from the current search policy.
 
@@ -85,19 +91,21 @@ make
 wget https://github.com/PascalPons/connect4/releases/download/book/7x6.book
 ```
 
-Now pass the solver paths to `train`, `score` and other commands:
+The V2 trainer never imports or invokes the solver. Standalone legacy scoring remains available:
 
 ```sh
 uv run python src/c4a0/main.py score solver/c4solver solver/7x6.book
 ```
 
+V2 replacement decisions use the fixed-workload [end-to-end training benchmark](docs/training-benchmark.md),
+including a fail-closed comparison with the frozen sequential Rust implementation.
+
 ## Data compatibility
 
-Neural-network checkpoints remain ordinary Python `model.pkl` files. Native game records now use a
-versioned CBOR schema, and solver results use a versioned SQLite `solutions.db` cache. Game data or
-RocksDB caches created by the former backend are intentionally unsupported; begin with fresh
-self-play data and a fresh solver cache after this migration. Unknown data or cache versions fail
-with a clear error instead of being interpreted silently.
+V2 checkpoints are versioned PyTorch dictionaries under `training-v2/attempts/`; immutable replay
+shards use native CBOR and the run manifest is SQLite in WAL mode. Accepted checkpoints are kept,
+while old rejected weights are compacted. Legacy `model.pkl` generations remain readable by play,
+tournaments, and `train-legacy`; V2 never modifies a legacy directory.
 
 ## Results
 

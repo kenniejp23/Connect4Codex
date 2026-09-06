@@ -18,6 +18,10 @@ import torch
 from torch.utils.data import DataLoader
 
 from c4a0.nn import ConnectFourNet, ModelConfig
+from c4a0.training_common import (
+    TrainingCancelled,
+    parse_lr_schedule as parse_lr_schedule,
+)
 from c4a0.utils import BestModelCheckpoint
 
 import c4a0_cpp  # type: ignore
@@ -193,10 +197,6 @@ class SolverConfig(BaseModel):
     solver_path: str
     book_path: str
     solutions_path: str
-
-
-class TrainingCancelled(RuntimeError):
-    """Raised when a cooperative training cancellation is requested."""
 
 
 ProgressCallback = Callable[[str, Dict[str, Any]], None]
@@ -516,17 +516,3 @@ class SampleDataModule(pl.LightningDataModule):
             self.validation_data,  # type: ignore
             batch_size=self.batch_size,
         )
-
-
-def parse_lr_schedule(floats: List[float]) -> Dict[int, float]:
-    """Parses an lr_schedule sequence like "0 2e-3 10 8e-4" into a dict of {0: 2e-3, 10: 8e-4}."""
-    assert len(floats) % 2 == 0, "lr_schedule must have an even number of elements"
-    schedule = {}
-    for i in range(0, len(floats), 2):
-        threshold = int(floats[i])
-        assert threshold == floats[i], (
-            "lr_schedule must alternate between gen_id (int) and lr (float)"
-        )
-        lr = floats[i + 1]
-        schedule[threshold] = lr
-    return schedule

@@ -81,6 +81,7 @@ class PlayGamesResult {
   std::vector<GameResult> results;
 
   [[nodiscard]] PlayGamesResult combined(const PlayGamesResult& other) const;
+  [[nodiscard]] std::vector<PlayGamesResult> split_games(std::size_t chunk_size) const;
   [[nodiscard]] std::pair<std::vector<Sample>, std::vector<Sample>> split_train_test(
       float train_fraction, std::uint64_t seed) const;
   [[nodiscard]] std::size_t unique_positions() const;

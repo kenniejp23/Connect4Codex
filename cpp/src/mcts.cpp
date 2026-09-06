@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <limits>
 #include <memory>
+#include <random>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -20,6 +21,35 @@ constexpr float kNodeEpsilon = 1.0e-8F;
 bool all_equal(const Policy& policy) noexcept {
   return std::all_of(policy.begin() + 1, policy.end(),
                      [&policy](float value) { return value == policy[0]; });
+}
+
+Policy mix_dirichlet_noise(const Position& position, Policy policy, float alpha,
+                           float epsilon, std::uint64_t seed) {
+  if (!std::isfinite(alpha) || alpha <= 0.0F || !std::isfinite(epsilon) ||
+      epsilon <= 0.0F || epsilon > 1.0F) {
+    throw std::invalid_argument("invalid root Dirichlet noise parameters");
+  }
+  const auto legal = position.legal_moves();
+  Pcg32 rng(seed);
+  std::gamma_distribution<float> gamma(alpha, 1.0F);
+  Policy noise{};
+  float noise_sum = 0.0F;
+  for (std::size_t col = 0; col < kCols; ++col) {
+    if (legal[col]) {
+      noise[col] = gamma(rng);
+      noise_sum += noise[col];
+    }
+  }
+  if (!(noise_sum > 0.0F) || !std::isfinite(noise_sum)) {
+    throw std::runtime_error("could not generate root Dirichlet noise");
+  }
+  for (std::size_t col = 0; col < kCols; ++col) {
+    if (legal[col]) {
+      noise[col] /= noise_sum;
+      policy[col] = (1.0F - epsilon) * policy[col] + epsilon * noise[col];
+    }
+  }
+  return policy;
 }
 
 }  // namespace
@@ -187,7 +217,9 @@ ModelId MctsGame::leaf_model_id_to_play() const {
 
 void MctsGame::receive_evaluation(Policy policy_logits, QValue q_penalty,
                                   QValue q_no_penalty, float c_exploration,
-                                  float c_ply_penalty) {
+                                  float c_ply_penalty, float root_dirichlet_alpha,
+                                  float root_dirichlet_epsilon,
+                                  std::uint64_t noise_seed) {
   const auto terminal = leaf_->position.terminal_values(c_ply_penalty);
   if (terminal.has_value()) {
     backpropagate(terminal->first, terminal->second);
@@ -196,8 +228,30 @@ void MctsGame::receive_evaluation(Policy policy_logits, QValue q_penalty,
   }
 
   leaf_->position.mask_policy(policy_logits);
-  expand_leaf(softmax(policy_logits));
+  auto policy = softmax(policy_logits);
+  if (leaf_ == root_.get() && root_dirichlet_epsilon > 0.0F) {
+    policy =
+        mix_dirichlet_noise(leaf_->position, policy, root_dirichlet_alpha,
+                            root_dirichlet_epsilon, noise_seed ^ metadata_.game_id);
+  }
+  expand_leaf(policy);
   backpropagate(q_penalty, q_no_penalty);
+  select_leaf(c_exploration);
+}
+
+void MctsGame::add_root_dirichlet_noise(float alpha, float epsilon, float c_exploration,
+                                        std::uint64_t noise_seed) {
+  if (epsilon == 0.0F || !root_->expanded ||
+      root_->position.terminal_state().has_value()) {
+    return;
+  }
+  root_->child_priors = mix_dirichlet_noise(root_->position, root_->child_priors, alpha,
+                                            epsilon, noise_seed ^ metadata_.game_id);
+  for (std::size_t col = 0; col < kCols; ++col) {
+    if (root_->children[col] != nullptr) {
+      root_->children[col]->initial_policy_value = root_->child_priors[col];
+    }
+  }
   select_leaf(c_exploration);
 }
 
@@ -305,10 +359,13 @@ void MctsGame::make_move(Move move, float c_exploration) {
   select_leaf(c_exploration);
 }
 
-void MctsGame::make_random_move(float c_exploration, float temperature) {
-  const auto seed =
-      metadata_.game_id * static_cast<std::uint64_t>(kRows * kCols + moves_.size());
-  Pcg32 rng(seed);
+void MctsGame::make_random_move(float c_exploration, float temperature,
+                                std::uint64_t seed) {
+  const auto move_seed =
+      metadata_.game_id *
+          static_cast<std::uint64_t>(kRows * kCols + root_->position.ply()) ^
+      seed;
+  Pcg32 rng(move_seed);
   auto policy = root_->policy();
   const auto legal = root_->position.legal_moves();
   for (std::size_t col = 0; col < kCols; ++col) {

@@ -114,26 +114,14 @@ run = [
 # Training / app lifecycle
 
 [tasks."train:smoke"]
-description = "Run a fast CPU end-to-end smoke training job"
+description = "Run a bounded asynchronous CPU V2 training smoke job"
 depends = ["build"]
-run = '''
-rm -rf training/ci-smoke
-uv run python src/c4a0/main.py train \
-  --base-dir training/ci-smoke \
-  --device cpu \
-  --n-self-play-games 4 \
-  --n-mcts-iterations 4 \
-  --self-play-batch-size 16 \
-  --training-batch-size 16 \
-  --n-residual-blocks 1 \
-  --conv-filter-size 8 \
-  --n-policy-layers 1 \
-  --n-value-layers 1 \
-  --lr-schedule 0 \
-  --lr-schedule 0.001 \
-  --l2-reg 0 \
-  --max-gens 1
-'''
+run = "uv run pytest -q tests/c4a0_tests/training_v2_test.py::test_async_worker_completes_after_one_candidate_decision"
+
+[tasks."benchmark:training"]
+description = "Run the fixed-workload V2 end-to-end training benchmark"
+depends = ["build"]
+run = "uv run c4a0 benchmark-training benchmark-results/v2.json --workflow v2"
 
 [tasks.gui]
 description = "Launch the native PySide6 desktop application"

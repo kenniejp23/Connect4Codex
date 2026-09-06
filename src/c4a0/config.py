@@ -85,9 +85,96 @@ class TrainingConfig(StrictConfig):
         )
 
 
+class TrainingV2Config(StrictConfig):
+    """Validated configuration for asynchronous neural-only training."""
+
+    base_dir: str = "training-v2"
+    device: str = Field(default_factory=lambda: str(get_torch_device()))
+    run_seed: int = Field(default=1337, ge=0)
+    n_mcts_iterations: int = Field(default=1400, ge=1)
+    c_exploration: float = Field(default=6.6, ge=0)
+    c_ply_penalty: float = Field(default=0.01, ge=0)
+    mcts_value_scale: float = Field(default=0.0, ge=0, le=1)
+    """Scale neural values used by MCTS; zero safely bootstraps from policy/terminals."""
+    value_loss_weight: float = Field(default=0.0, ge=0, le=1)
+    """Weight for neural value losses; zero avoids bootstrap interference."""
+    self_play_shard_games: int = Field(default=256, ge=2)
+    self_play_batch_games: int = Field(default=512, ge=2)
+    replay_capacity_games: int = Field(default=20_000, ge=4)
+    replay_warmup_games: int = Field(default=2_048, ge=2)
+    replay_ratio: float = Field(default=4.0, gt=0)
+    validation_fraction: float = Field(default=0.05, gt=0, lt=0.5)
+    archive_depth: int = Field(default=8, ge=1)
+    champion_self_play_weight: float = Field(default=0.65, ge=0, le=1)
+    archive_weight: float = Field(default=0.30, ge=0, le=1)
+    uniform_weight: float = Field(default=0.025, ge=0, le=1)
+    random_weight: float = Field(default=0.025, ge=0, le=1)
+    archive_recency: float = Field(default=0.7, gt=0, le=1)
+    arena_min_games: int = Field(default=40, ge=2)
+    arena_max_games: int = Field(default=800, ge=2, le=2_000)
+    arena_p0: float = Field(default=0.50, gt=0, lt=1)
+    arena_p1: float = Field(default=0.55, gt=0, lt=1)
+    arena_alpha: float = Field(default=0.05, gt=0, lt=0.5)
+    arena_beta: float = Field(default=0.05, gt=0, lt=0.5)
+    arena_pair_batch_size: int = Field(default=100, ge=1, le=100)
+    root_dirichlet_epsilon: float = Field(default=0.25, ge=0, le=1)
+    root_dirichlet_alpha: float = Field(default=0.30, gt=0)
+    temperature_cutoff_ply: int = Field(default=8, ge=0, le=42)
+    early_temperature: float = Field(default=1.0, ge=0)
+    late_temperature: float = Field(default=0.0, ge=0)
+    training_batch_size: int = Field(default=512, ge=2)
+    inference_batch_size: int = Field(default=128, ge=1)
+    data_loader_workers: int = Field(default=2, ge=0)
+    mcts_worker_threads: int = Field(default=0, ge=0)
+    precision: Literal["auto", "16-mixed", "32-true"] = "auto"
+    inference_amp_min_batch_size: int = Field(default=96, ge=1)
+    n_residual_blocks: int = Field(default=1, ge=0)
+    conv_filter_size: int = Field(default=32, ge=1)
+    n_policy_layers: int = Field(default=4, ge=1)
+    n_value_layers: int = Field(default=2, ge=1)
+    lr_schedule: list[float] = Field(default_factory=lambda: [0, 2e-3, 10, 8e-4])
+    l2_reg: float = Field(default=4e-4, ge=0)
+    max_gens: int | None = Field(default=None, ge=1)
+    max_candidate_attempts: int | None = Field(default=None, ge=1)
+    validation_interval_steps: int = Field(default=100, ge=1)
+    validation_batches: int = Field(default=8, ge=1)
+    rejected_weight_retention: int = Field(default=3, ge=0)
+    learner_incumbent_min_score: float = Field(default=0.5, ge=0, le=1)
+    """Minimum arena score required to continue training a rejected learner."""
+    debt_pause_shards: int = Field(default=2, ge=2)
+    debt_resume_shards: int = Field(default=1, ge=1)
+
+    @model_validator(mode="after")
+    def validate_v2(self) -> "TrainingV2Config":
+        if self.self_play_batch_games < self.self_play_shard_games:
+            raise ValueError("self-play batch cannot be smaller than its replay shard")
+        if self.self_play_batch_games % self.self_play_shard_games:
+            raise ValueError("self-play batch must contain whole replay shards")
+        opponent_sum = (
+            self.champion_self_play_weight
+            + self.archive_weight
+            + self.uniform_weight
+            + self.random_weight
+        )
+        if abs(opponent_sum - 1.0) > 1e-9:
+            raise ValueError("opponent weights must sum to 1")
+        if self.replay_warmup_games >= self.replay_capacity_games:
+            raise ValueError("replay warmup must be smaller than replay capacity")
+        if self.arena_min_games % 2 or self.arena_max_games % 2:
+            raise ValueError("arena game limits must be even")
+        if self.arena_min_games > self.arena_max_games:
+            raise ValueError("arena minimum games cannot exceed maximum games")
+        if self.arena_p0 >= self.arena_p1:
+            raise ValueError("arena p0 must be smaller than p1")
+        if self.debt_resume_shards >= self.debt_pause_shards:
+            raise ValueError("debt resume watermark must be below pause watermark")
+        TrainingConfig(lr_schedule=self.lr_schedule)
+        return self
+
+
 class TournamentConfig(StrictConfig):
     players: list[str] = Field(default_factory=lambda: ["latest", "random"])
-    base_dir: str = "training"
+    base_dir: str = "training-v2"
     device: str = Field(default_factory=lambda: str(get_torch_device()))
     games_per_match: int = Field(default=2, ge=2)
     batch_size: int = Field(default=64, ge=1)

@@ -218,6 +218,52 @@ TEST_CASE("MCTS preserves reference visit, value, and model-routing semantics") 
   CHECK_FALSE(game.undo());
 }
 
+TEST_CASE("root Dirichlet noise is legal normalized and deterministic by seed") {
+  const auto position = Position::from_moves({0, 0, 0, 0, 0, 0});
+  const auto noisy_policy = [&position](std::uint64_t seed) {
+    MctsGame game(position,
+                  GameMetadata{.game_id = 41, .player0_id = 1, .player1_id = 1});
+    for (std::size_t iteration = 0; iteration < 200; ++iteration) {
+      game.receive_evaluation({}, 0.0F, 0.0F, kExploration, kPlyPenalty, 0.3F, 0.25F,
+                              seed);
+    }
+    return game.root_policy();
+  };
+
+  const auto first = noisy_policy(1337);
+  const auto repeated = noisy_policy(1337);
+  const auto different = noisy_policy(1338);
+  check_policy(first);
+  CHECK(first[0] == 0.0F);
+  CHECK(first == repeated);
+  CHECK(first != different);
+
+  MctsGame legacy(position,
+                  GameMetadata{.game_id = 41, .player0_id = 1, .player1_id = 1});
+  MctsGame zero_noise(position,
+                      GameMetadata{.game_id = 41, .player0_id = 1, .player1_id = 1});
+  for (std::size_t iteration = 0; iteration < 50; ++iteration) {
+    legacy.receive_evaluation({}, 0.0F, 0.0F, kExploration, kPlyPenalty);
+    zero_noise.receive_evaluation({}, 0.0F, 0.0F, kExploration, kPlyPenalty, 0.3F, 0.0F,
+                                  9999);
+  }
+  CHECK(legacy.root_policy() == zero_noise.root_policy());
+
+  const auto promoted_policy = [](std::uint64_t seed) {
+    MctsGame game(Position{},
+                  GameMetadata{.game_id = 52, .player0_id = 1, .player1_id = 1});
+    run_mcts(game, 100);
+    game.make_move(6, kExploration);
+    game.add_root_dirichlet_noise(0.3F, 0.25F, kExploration, seed);
+    run_mcts(game, 100);
+    return game.root_policy();
+  };
+  const auto promoted_first = promoted_policy(71);
+  check_policy(promoted_first);
+  CHECK(promoted_first == promoted_policy(71));
+  CHECK(promoted_first != promoted_policy(72));
+}
+
 TEST_CASE("MCTS early uniform visits preserve lazy-edge behavior", "[mcts][lazy]") {
   MctsGame game;
 
@@ -365,6 +411,13 @@ TEST_CASE("samples and aggregate results preserve games and split deterministica
   CHECK(combined.results.size() == 5);
   CHECK(first.results.size() == 4);
   CHECK(combined.unique_positions() == 5);
+  const auto chunks = combined.split_games(3);
+  REQUIRE(chunks.size() == 2);
+  CHECK(chunks[0].results.size() == 3);
+  CHECK(chunks[1].results.size() == 2);
+  CHECK(chunks[0].results.front().metadata.game_id == 0);
+  CHECK(chunks[1].results.back().metadata.game_id == 10);
+  CHECK_THROWS_AS(combined.split_games(0), std::invalid_argument);
 
   const auto [train1, test1] = first.split_train_test(0.5F, 1337);
   const auto [train2, test2] = first.split_train_test(0.5F, 1337);

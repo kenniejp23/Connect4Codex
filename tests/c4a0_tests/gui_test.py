@@ -12,7 +12,11 @@ from PySide6.QtQml import QQmlApplicationEngine  # noqa: E402
 from PySide6.QtQuickControls2 import QQuickStyle  # noqa: E402
 from PySide6.QtTest import QTest  # noqa: E402
 
-from c4a0.gui.app import AppController, GameController  # noqa: E402
+from c4a0.gui.app import (  # noqa: E402
+    AppController,
+    GameController,
+    _configured_training_dir,
+)
 from c4a0.gui.jobs import JobManager  # noqa: E402
 
 
@@ -37,6 +41,17 @@ def _wait_until(application: QGuiApplication, predicate, timeout: float = 3.0):
             return
         time.sleep(0.01)
     raise AssertionError("condition did not become true")
+
+
+def test_gui_migrates_the_old_default_training_directory_once(tmp_path):
+    settings = QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
+    settings.setValue("paths/training", "training")
+
+    assert _configured_training_dir(settings) == "training-v2"
+    assert settings.value("paths/training") == "training-v2"
+
+    settings.setValue("paths/training", "training")
+    assert _configured_training_dir(settings) == "training"
 
 
 def test_qml_shell_loads_and_game_controller_accepts_moves(tmp_path):

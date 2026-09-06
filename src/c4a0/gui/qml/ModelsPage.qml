@@ -5,7 +5,7 @@ import QtQuick.Layouts
 Item {
     id: page
     property int selectedGeneration: -1
-    property string stats: "Select a generation to inspect its self-play data."
+    property string stats: "Select a saved model to inspect its metadata."
     property var details: ({})
 
     function selectGeneration(generation) {
@@ -47,13 +47,13 @@ Item {
                     anchors.fill: parent; anchors.margins: 16; spacing: 10
                     RowLayout {
                         Layout.fillWidth: true
-                        Text { text: "GENERATIONS"; color: ApplicationWindow.window.faintTextColor; font.pixelSize: 10; font.weight: Font.DemiBold; font.letterSpacing: 1 }
+                        Text { text: App.modelCollectionName.toUpperCase(); color: ApplicationWindow.window.faintTextColor; font.pixelSize: 10; font.weight: Font.DemiBold; font.letterSpacing: 1 }
                         Item { Layout.fillWidth: true }
                         Text { text: App.generations.length + " found"; color: ApplicationWindow.window.mutedTextColor; font.pixelSize: 11 }
                     }
                     Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 36; radius: 7; color: ApplicationWindow.window.panelRaisedColor
                         RowLayout { anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 12
-                            Text { Layout.preferredWidth: 90; text: "Generation"; color: ApplicationWindow.window.faintTextColor; font.pixelSize: 10 }
+                            Text { Layout.preferredWidth: 90; text: App.trainingV2 ? "Attempt" : "Generation"; color: ApplicationWindow.window.faintTextColor; font.pixelSize: 10 }
                             Text { Layout.fillWidth: true; text: "Created"; color: ApplicationWindow.window.faintTextColor; font.pixelSize: 10 }
                             Text { Layout.preferredWidth: 100; text: "Validation loss"; color: ApplicationWindow.window.faintTextColor; font.pixelSize: 10; horizontalAlignment: Text.AlignRight }
                             Text { Layout.preferredWidth: 90; text: "Solver"; color: ApplicationWindow.window.faintTextColor; font.pixelSize: 10; horizontalAlignment: Text.AlignRight }
@@ -77,14 +77,14 @@ Item {
                                           ? (ApplicationWindow.window ? ApplicationWindow.window.accentColor : "#F4C44E")
                                           : "transparent"
                             RowLayout { anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 12
-                                Text { Layout.preferredWidth: 90; text: "Gen " + modelData.generation; color: ApplicationWindow.window ? ApplicationWindow.window.textColor : "#F4F7FB"; font.pixelSize: 12; font.weight: Font.DemiBold }
+                                Text { Layout.preferredWidth: 90; text: (App.trainingV2 ? "Attempt " : "Gen ") + modelData.generation; color: ApplicationWindow.window ? ApplicationWindow.window.textColor : "#F4F7FB"; font.pixelSize: 12; font.weight: Font.DemiBold }
                                 Text { Layout.fillWidth: true; text: modelData.created; color: ApplicationWindow.window ? ApplicationWindow.window.mutedTextColor : "#9DAAC0"; font.pixelSize: 11 }
                                 Text { Layout.preferredWidth: 100; text: modelData.valLoss === null || modelData.valLoss === undefined ? "—" : Number(modelData.valLoss).toFixed(4); color: ApplicationWindow.window ? ApplicationWindow.window.textColor : "#F4F7FB"; font.pixelSize: 11; horizontalAlignment: Text.AlignRight }
                                 Text { Layout.preferredWidth: 90; text: modelData.solverScore === null || modelData.solverScore === undefined ? "—" : (Number(modelData.solverScore) * 100).toFixed(1) + "%"; color: ApplicationWindow.window ? ApplicationWindow.window.textColor : "#F4F7FB"; font.pixelSize: 11; horizontalAlignment: Text.AlignRight }
                             }
                             MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: page.selectGeneration(modelData.generation) }
                         }
-                        Label { anchors.centerIn: parent; visible: App.generations.length === 0; text: "No generations found in this directory"; color: ApplicationWindow.window.mutedTextColor }
+                        Label { anchors.centerIn: parent; visible: App.generations.length === 0; text: "No " + App.modelCollectionName + " found in this directory"; color: ApplicationWindow.window.mutedTextColor }
                     }
                 }
             }
@@ -94,8 +94,8 @@ Item {
                 Layout.fillHeight: true
                 ColumnLayout {
                     anchors.fill: parent; anchors.margins: 16; spacing: 12
-                    Text { text: page.selectedGeneration < 0 ? "GENERATION INSPECTOR" : "GENERATION " + page.selectedGeneration; color: ApplicationWindow.window.faintTextColor; font.pixelSize: 10; font.weight: Font.DemiBold; font.letterSpacing: 1 }
-                    Text { text: "Self-play statistics"; color: ApplicationWindow.window.textColor; font.pixelSize: 18; font.weight: Font.DemiBold }
+                    Text { text: page.selectedGeneration < 0 ? "MODEL INSPECTOR" : (App.trainingV2 ? "ATTEMPT " : "GENERATION ") + page.selectedGeneration; color: ApplicationWindow.window.faintTextColor; font.pixelSize: 10; font.weight: Font.DemiBold; font.letterSpacing: 1 }
+                    Text { text: App.trainingV2 ? "Attempt and run metadata" : "Self-play statistics"; color: ApplicationWindow.window.textColor; font.pixelSize: 18; font.weight: Font.DemiBold }
                     RowLayout {
                         Layout.fillWidth: true
                         visible: page.details.games !== undefined

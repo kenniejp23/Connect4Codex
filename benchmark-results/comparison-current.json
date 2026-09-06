@@ -1,0 +1,45 @@
+{
+  "format": "c4a0-training-benchmark-comparison",
+  "version": 1,
+  "replacement_approved": true,
+  "decision": "V2 may replace legacy Rust",
+  "gates": {
+    "games_per_second": {
+      "v2": 29.00708178887393,
+      "legacy_rust": 13.313022531281648,
+      "ratio": 2.178850198797148,
+      "required_ratio": 0.9,
+      "passed": true
+    },
+    "train_positions_per_second": {
+      "v2": 1779.1593196882554,
+      "legacy_rust": 1595.9265212297903,
+      "ratio": 1.1148128037356442,
+      "required_ratio": 0.9,
+      "passed": true
+    },
+    "arena_games_per_second": {
+      "v2": 8.798829002565213,
+      "legacy_rust": 5.754299454218918,
+      "ratio": 1.5290877842852126,
+      "required_ratio": 0.9,
+      "passed": true
+    },
+    "solver_score_per_wall_clock_hour": {
+      "v2": 298.36670070711205,
+      "legacy_rust": 317.8604836099222,
+      "ratio": 0.9386718893729084,
+      "required_ratio": 0.9,
+      "passed": true
+    },
+    "candidate_latency_seconds": {
+      "v2": 1.4937867970002117,
+      "legacy_rust": 2.874429190000228,
+      "ratio": 0.5196811952080451,
+      "maximum_ratio": 1.1,
+      "passed": true
+    }
+  },
+  "v2_revision": "aa0da6f20e2ea9e2fe57265b46d42664a2b88657",
+  "legacy_revision": "496a1f16cd5c7b742a573c6445cb6555ab246bb0"
+}

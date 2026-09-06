@@ -17,13 +17,13 @@ from c4a0.config import (
     NNSweepConfig,
     SolverScoreConfig,
     TournamentConfig,
-    TrainingConfig,
+    TrainingV2Config,
     ValidationConfig,
 )
 
 
 JOB_CONFIG_TYPES = {
-    "training": TrainingConfig,
+    "training": TrainingV2Config,
     "solver_score": SolverScoreConfig,
     "tournament": TournamentConfig,
     "nn_sweep": NNSweepConfig,
@@ -58,6 +58,14 @@ class JobManager(QObject):
         self._progress = 0.0
         self._result = ""
         self._result_data: dict[str, Any] = {}
+        self._live_training: dict[str, Any] = {
+            "actor": "Idle",
+            "trainer": "Idle",
+            "arena": "Idle",
+            "replay": "0 games",
+            "champion": "0",
+            "candidate": "None",
+        }
         self._saw_terminal_event = False
         self._stop_after_generation_requested = False
 
@@ -96,6 +104,10 @@ class JobManager(QObject):
     @Property(dict, notify=stateChanged)
     def resultData(self) -> dict[str, Any]:
         return self._result_data
+
+    @Property(dict, notify=stateChanged)
+    def liveTraining(self) -> dict[str, Any]:
+        return self._live_training
 
     @Property(bool, notify=stateChanged)
     def stopAfterGenerationRequested(self) -> bool:
@@ -169,6 +181,14 @@ class JobManager(QObject):
         self._progress = 0.0
         self._result = ""
         self._result_data = {}
+        self._live_training = {
+            "actor": "Starting",
+            "trainer": "Starting",
+            "arena": "Idle",
+            "replay": "0 games",
+            "champion": "0",
+            "candidate": "None",
+        }
         self._stdout_buffer = ""
         self._saw_terminal_event = False
         self._stop_after_generation_requested = False
@@ -224,7 +244,53 @@ class JobManager(QObject):
         if event_type == "started":
             self._phase = "Running"
         elif event_type == "phase":
-            self._phase = str(event.get("name", "Running")).replace("_", " ").title()
+            phase_name = str(event.get("name", "Running"))
+            self._phase = phase_name.replace("_", " ").title()
+            component = str(event.get("component", ""))
+            if component in {"actor", "trainer", "arena"}:
+                if phase_name == "backpressure":
+                    self._live_training[component] = (
+                        "Paused for training debt"
+                        if event.get("paused")
+                        else "Self-play"
+                    )
+                elif phase_name == "self_play_progress":
+                    self._live_training[component] = (
+                        f"{event.get('completed_games', 0)}/"
+                        f"{event.get('total_games', '?')} games · "
+                        f"MCTS {event.get('mcts_iterations', 0)} · "
+                        f"q {event.get('neural_queue_depth', 0)}/"
+                        f"{event.get('mcts_queue_depth', 0)}"
+                    )
+                elif phase_name == "arena_progress":
+                    self._live_training[component] = (
+                        f"{event.get('completed_games', 0)}/"
+                        f"{event.get('total_games', '?')} · "
+                        f"{event.get('wins', 0)}W/"
+                        f"{event.get('draws', 0)}D/"
+                        f"{event.get('losses', 0)}L · "
+                        f"q {event.get('neural_queue_depth', 0)}/"
+                        f"{event.get('mcts_queue_depth', 0)}"
+                    )
+                elif phase_name == "training" and "sample_budget" in event:
+                    self._live_training[component] = (
+                        f"{event.get('positions_per_second', 0):.0f} pos/s · "
+                        f"queue {event.get('sample_budget', 0)} pos"
+                    )
+                else:
+                    self._live_training[component] = self._phase
+            if "replay_games" in event:
+                self._live_training["replay"] = (
+                    f"{event['replay_games']} games / "
+                    f"{event.get('replay_shards', 0)} shards"
+                )
+            if "champion" in event:
+                self._live_training["champion"] = str(event["champion"])
+            if "pending_candidate" in event:
+                pending = event["pending_candidate"]
+                self._live_training["candidate"] = (
+                    "None" if pending is None else str(pending)
+                )
         elif event_type == "progress":
             self._progress = max(0.0, min(1.0, float(event.get("fraction", 0.0))))
         elif event_type == "log":

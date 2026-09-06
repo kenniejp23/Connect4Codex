@@ -413,10 +413,37 @@ NB_MODULE(_native, module) {
                       .def_ro("player1_id", &GameMetadata::player1_id);
   metadata.attr("__module__") = "c4a0_cpp";
 
+  auto game_request = nb::class_<GameRequest>(module, "GameRequest")
+                          .def(nb::init<GameMetadata, std::vector<Move>>(),
+                               "metadata"_a, "opening_moves"_a = std::vector<Move>{})
+                          .def_ro("metadata", &GameRequest::metadata)
+                          .def_ro("opening_moves", &GameRequest::opening_moves);
+  game_request.attr("__module__") = "c4a0_cpp";
+
+  auto self_play_options =
+      nb::class_<SelfPlayOptions>(module, "SelfPlayOptions")
+          .def(nb::init<>())
+          .def_rw("max_nn_batch_size", &SelfPlayOptions::max_nn_batch_size)
+          .def_rw("n_mcts_iterations", &SelfPlayOptions::n_mcts_iterations)
+          .def_rw("c_exploration", &SelfPlayOptions::c_exploration)
+          .def_rw("c_ply_penalty", &SelfPlayOptions::c_ply_penalty)
+          .def_rw("root_dirichlet_alpha", &SelfPlayOptions::root_dirichlet_alpha)
+          .def_rw("root_dirichlet_epsilon", &SelfPlayOptions::root_dirichlet_epsilon)
+          .def_rw("temperature_midpoint_ply",
+                  &SelfPlayOptions::temperature_midpoint_ply)
+          .def_rw("temperature_cutoff_ply", &SelfPlayOptions::temperature_cutoff_ply)
+          .def_rw("early_temperature", &SelfPlayOptions::early_temperature)
+          .def_rw("middle_temperature", &SelfPlayOptions::middle_temperature)
+          .def_rw("late_temperature", &SelfPlayOptions::late_temperature)
+          .def_rw("seed", &SelfPlayOptions::seed)
+          .def_rw("worker_threads", &SelfPlayOptions::worker_threads);
+  self_play_options.attr("__module__") = "c4a0_cpp";
+
   auto sample =
       nb::class_<Sample>(module, "Sample")
           .def("flip_h", &Sample::flip_horizontal)
           .def("to_numpy", &sample_to_numpy)
+          .def_prop_ro("ply", [](const Sample& value) { return value.pos.ply(); })
           .def("pos_str", [](const Sample& value) { return value.pos.to_string(); });
   sample.attr("__module__") = "c4a0_cpp";
 
@@ -434,6 +461,7 @@ NB_MODULE(_native, module) {
           .def_prop_ro("results",
                        [](const PlayGamesResult& value) { return value.results; })
           .def("__add__", &PlayGamesResult::combined)
+          .def("split_games", &PlayGamesResult::split_games, "chunk_size"_a)
           .def("split_train_test", &PlayGamesResult::split_train_test, "train_frac"_a,
                "seed"_a)
           .def("unique_positions", &PlayGamesResult::unique_positions)
@@ -512,6 +540,58 @@ NB_MODULE(_native, module) {
       "reqs"_a, "max_nn_batch_size"_a, "n_mcts_iterations"_a, "c_exploration"_a,
       "c_ply_penalty"_a, "py_eval_pos_cb"_a, "progress_callback"_a = nb::none(),
       "cancelled_callback"_a = nb::none());
+
+  module.def(
+      "play_games_v2",
+      [](const std::vector<GameRequest>& requests, const SelfPlayOptions& options,
+         nb::object callback, nb::object progress_callback,
+         nb::object cancelled_callback, nb::object telemetry_callback) {
+        if (requests.empty()) {
+          return PlayGamesResult{};
+        }
+        PythonEvaluator evaluator(std::move(callback));
+        SelfPlayProgressCallback progress;
+        if (!progress_callback.is_none()) {
+          progress = [callback = std::move(progress_callback)](std::size_t completed,
+                                                               std::size_t total) {
+            nb::gil_scoped_acquire acquire;
+            callback(completed, total);
+          };
+        }
+        CancellationCallback cancelled;
+        if (!cancelled_callback.is_none()) {
+          cancelled = [callback = std::move(cancelled_callback)] {
+            nb::gil_scoped_acquire acquire;
+            return nb::cast<bool>(callback());
+          };
+        }
+        SelfPlayTelemetryCallback telemetry;
+        if (!telemetry_callback.is_none()) {
+          telemetry = [callback = std::move(telemetry_callback)](
+                          const SelfPlayTelemetry& value) {
+            nb::gil_scoped_acquire acquire;
+            nb::dict snapshot;
+            snapshot["completed_games"] = value.completed_games;
+            snapshot["total_games"] = value.total_games;
+            snapshot["neural_evaluations"] = value.neural_evaluations;
+            snapshot["mcts_iterations"] = value.mcts_iterations;
+            snapshot["neural_queue_depth"] = value.neural_queue_depth;
+            snapshot["mcts_queue_depth"] = value.mcts_queue_depth;
+            snapshot["elapsed_seconds"] = value.elapsed_seconds;
+            snapshot["final"] = value.final;
+            callback(snapshot);
+          };
+        }
+        std::vector<GameResult> results;
+        {
+          nb::gil_scoped_release release;
+          results = self_play(evaluator, requests, options, std::move(progress),
+                              std::move(cancelled), std::move(telemetry));
+        }
+        return PlayGamesResult{.results = std::move(results)};
+      },
+      "requests"_a, "options"_a, "py_eval_pos_cb"_a, "progress_callback"_a = nb::none(),
+      "cancelled_callback"_a = nb::none(), "telemetry_callback"_a = nb::none());
 
   module.def(
       "run_tui",

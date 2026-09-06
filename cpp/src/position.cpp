@@ -399,6 +399,26 @@ PlayGamesResult PlayGamesResult::combined(const PlayGamesResult& other) const {
   return result;
 }
 
+std::vector<PlayGamesResult> PlayGamesResult::split_games(
+    std::size_t chunk_size) const {
+  if (chunk_size == 0) {
+    throw std::invalid_argument("game chunk size must be positive");
+  }
+  auto ordered = results;
+  std::ranges::sort(ordered, {},
+                    [](const GameResult& game) { return game.metadata.game_id; });
+  std::vector<PlayGamesResult> chunks;
+  chunks.reserve((ordered.size() + chunk_size - 1) / chunk_size);
+  for (std::size_t start = 0; start < ordered.size(); start += chunk_size) {
+    const std::size_t finish = std::min(start + chunk_size, ordered.size());
+    PlayGamesResult chunk;
+    chunk.results.insert(chunk.results.end(), ordered.begin() + start,
+                         ordered.begin() + finish);
+    chunks.push_back(std::move(chunk));
+  }
+  return chunks;
+}
+
 std::pair<std::vector<Sample>, std::vector<Sample>> PlayGamesResult::split_train_test(
     float train_fraction, std::uint64_t seed) const {
   if (!std::isfinite(train_fraction) || train_fraction < 0.0F ||
