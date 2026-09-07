@@ -23,7 +23,7 @@ checks does not establish long-run training stability or playing strength.
 - Coordinators use Linux advisory locks; children receive a parent-death signal. Readers use
   read-only SQLite connections. Artifact paths migrate to run-relative storage, and atomic
   renames synchronize their directories. Resume settings are visible and immutable in the GUI.
-- Model discovery/statistics are asynchronous. Forms reflow at minimum size, primary actions
+- Model discovery/statistics are asynchronous; superseded game loads are cancelled. Forms reflow at minimum size, primary actions
   have explicit contrast, and board columns expose keyboard/accessibility actions and status
   announcements. Complete presets come from Python. Logs and job history are bounded.
 - Component reports validate workload identity and finite metrics. Production benchmarking runs
@@ -40,7 +40,7 @@ The retained benchmark reports identify their original revision and dirty-tree s
 
 | Check | Latest completed result |
 |---|---|
-| Python suite | 115 passed |
+| Python suite | 116 passed |
 | Native suite | 33 passed |
 | ASan/UBSan | 33 passed |
 | TSan | 33 passed |

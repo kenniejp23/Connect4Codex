@@ -20,15 +20,18 @@ jobs:
           cache: true
 
       - name: Install desktop runtime libraries
-        run: sudo apt-get update && sudo apt-get install -y libegl1 libxkbcommon-x11-0 libxcb-cursor0 libopengl0 xvfb
+        run: sudo apt-get update && sudo apt-get install -y libegl1 libxkbcommon-x11-0 libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 libx11-xcb1 libopengl0 xvfb
+
+      - name: X11 desktop interaction
+        run: |
+          mise run install
+          mise exec -- uv run python -c 'import ctypes; from pathlib import Path; from PySide6.QtCore import QLibraryInfo; ctypes.CDLL(str(Path(QLibraryInfo.path(QLibraryInfo.LibraryPath.PluginsPath)) / "platforms/libqxcb.so"))'
+          xvfb-run -a env QT_QPA_PLATFORM=xcb mise exec -- uv run pytest -q -s tests/c4a0_tests/gui_test.py
 
       - name: Run CI tasks
         run: mise run ci
         env:
           QT_QPA_PLATFORM: offscreen
-
-      - name: X11 desktop interaction
-        run: xvfb-run -a env QT_QPA_PLATFORM=xcb mise exec -- uv run pytest -q tests/c4a0_tests/gui_test.py
 
       - name: Installed wheel with locked dependencies
         run: mise exec -- bash scripts/check-wheel.sh locked

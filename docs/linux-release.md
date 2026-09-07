@@ -7,7 +7,8 @@ or passing unit tests is not release approval.
 Download the wheel, `linux-py311.txt`, `install-linux.sh`, and `SHA256SUMS` from the
 same GitHub Release. Verify the downloaded files with `sha256sum --ignore-missing -c SHA256SUMS`.
 Install Python 3.11 with its venv module and the Ubuntu packages `libegl1`, `libopengl0`,
-`libxkbcommon-x11-0`, and `libxcb-cursor0` before running the installer.
+`libxkbcommon-x11-0`, `libxcb-cursor0`, `libxcb-icccm4`, `libxcb-keysyms1`,
+and `libx11-xcb1` before running the installer.
 
 ```sh
 bash install-linux.sh cpu /path/to/c4a0.whl /path/to/linux-py311.txt

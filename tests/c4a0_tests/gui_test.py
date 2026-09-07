@@ -158,3 +158,32 @@ def test_primary_action_visible_in_both_themes_at_minimum_size(tmp_path):
     import shiboken6
 
     shiboken6.delete(engine)
+
+
+def test_rapid_game_starts_cancel_pending_loads(tmp_path):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    application = _application(tmp_path)
+    controller = AppController()
+    game = GameController(controller)
+    game._executor.shutdown(wait=True)
+    game._executor = ThreadPoolExecutor(max_workers=1)
+    release = threading.Event()
+    blocker = game._executor.submit(release.wait, 5)
+    obsolete = []
+    try:
+        for _ in range(30):
+            game.startGame("Human", "Human", 1, 1.0, 0.01)
+            obsolete.append(game._load_future)
+        assert all(
+            future is not None and future.cancelled() for future in obsolete[:-1]
+        )
+        assert obsolete[-1] is not None and not obsolete[-1].cancelled()
+        game.shutdown()
+        assert obsolete[-1].cancelled()
+    finally:
+        release.set()
+        blocker.result(timeout=3)
+        game._executor.shutdown(wait=True)
+        application.processEvents()

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 import sys
 from typing import Any
@@ -403,6 +403,7 @@ class GameController(QObject):
         self._gold_spec = "Latest Model"
         self._auto = {"red": False, "gold": True}
         self._load_revision = 0
+        self._load_future: Future | None = None
         self._executor = ThreadPoolExecutor(
             max_workers=2, thread_name_prefix="c4a0-play"
         )
@@ -514,6 +515,8 @@ class GameController(QObject):
         self.changed.emit()
 
         def build():
+            if revision != self._load_revision:
+                return None, None, None
             try:
                 router = ProcessEvaluator(
                     build_players, (red_spec, gold_spec, directory, device)
@@ -531,8 +534,13 @@ class GameController(QObject):
                 return None, None, str(error)
 
         future = self._executor.submit(build)
+        self._load_future = future
         future.add_done_callback(
-            lambda result: self._loaded.emit(revision, result.result())
+            lambda result: (
+                self._loaded.emit(revision, result.result())
+                if not result.cancelled()
+                else None
+            )
         )
 
     @Slot(int, object)
@@ -695,6 +703,9 @@ class GameController(QObject):
 
     def shutdown(self) -> None:
         self._load_revision += 1
+        if self._load_future is not None:
+            self._load_future.cancel()
+            self._load_future = None
         if self._game is not None:
             self._executor.submit(self._close_game, self._game, self._router)
         self._game = None
