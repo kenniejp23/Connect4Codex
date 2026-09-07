@@ -35,6 +35,7 @@ UV_LINK_MODE=hardlink uv pip install --python "$venv_dir/bin/python" "${constrai
 cd "$venv_dir"
 env -u PYTHONPATH QT_QPA_PLATFORM=offscreen "$venv_dir/bin/python" - <<'PY'
 import importlib.util
+import importlib.metadata
 from importlib.resources import files
 
 import numpy as np
@@ -47,6 +48,7 @@ assert c4a0_cpp.N_ROWS == 6
 assert c4a0_cpp.N_COLS == 7
 assert importlib.util.find_spec("c4a0_rust") is None
 assert files("c4a0.gui").joinpath("qml", "Main.qml").is_file()
+assert any(str(path).endswith("/licenses/NOTICE.md") for path in importlib.metadata.files("c4a0") or [])
 
 def evaluate(_model_id, positions):
     batch_size = positions.shape[0]
