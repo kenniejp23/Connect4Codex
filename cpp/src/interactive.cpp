@@ -92,10 +92,22 @@ struct InteractivePlay::Impl {
       }
 
       background_running = true;
+      const auto evaluation_revision = revision;
       try {
         const Position leaf = game.leaf_position();
         const ModelId model_id = game.leaf_model_id_to_play();
-        auto evaluations = evaluator.evaluate(model_id, std::vector<Position>{leaf});
+        lock.unlock();
+        std::vector<EvalPosResult> evaluations;
+        try {
+          evaluations = evaluator.evaluate(model_id, std::vector<Position>{leaf});
+        } catch (...) {
+          lock.lock();
+          throw;
+        }
+        lock.lock();
+        if (evaluation_revision != revision || stop_token.stop_requested()) {
+          continue;
+        }
         if (evaluations.size() != 1) {
           throw std::runtime_error(
               "evaluator returned a different number of results than "
@@ -106,10 +118,13 @@ struct InteractivePlay::Impl {
         game.receive_evaluation(evaluation.policy, evaluation.q_penalty,
                                 evaluation.q_no_penalty, c_exploration, c_ply_penalty);
       } catch (...) {
+        if (evaluation_revision != revision || stop_token.stop_requested()) {
+          continue;
+        }
         background_error = std::current_exception();
         background_running = false;
         state_changed.notify_all();
-        return;
+        continue;
       }
 
       if (!should_search_locked()) {
@@ -160,6 +175,7 @@ struct InteractivePlay::Impl {
   float c_ply_penalty;
   bool background_running{};
   std::exception_ptr background_error;
+  std::size_t revision{};
   std::jthread background;
 };
 
@@ -217,6 +233,7 @@ bool InteractivePlay::make_move(Move move) {
 
   impl_->wait_until_root_is_expanded_locked(lock);
   impl_->game.make_move(move, impl_->c_exploration);
+  ++impl_->revision;
   impl_->signal_search_locked();
   return true;
 }
@@ -234,6 +251,7 @@ bool InteractivePlay::make_random_move(float temperature) {
 
   impl_->wait_until_root_is_expanded_locked(lock);
   impl_->game.make_random_move(impl_->c_exploration, temperature);
+  ++impl_->revision;
   impl_->signal_search_locked();
   return true;
 }
@@ -247,25 +265,35 @@ bool InteractivePlay::make_best_move_if_ready() {
   }
 
   impl_->game.make_random_move(impl_->c_exploration, 0.0F);
+  ++impl_->revision;
   impl_->signal_search_locked();
   return true;
 }
 
 void InteractivePlay::reset() {
   std::lock_guard lock(impl_->mutex);
-  impl_->throw_background_error_locked();
+  impl_->background_error = nullptr;
+  ++impl_->revision;
   impl_->game.reset();
   impl_->signal_search_locked();
 }
 
 bool InteractivePlay::undo() {
   std::lock_guard lock(impl_->mutex);
-  impl_->throw_background_error_locked();
+  impl_->background_error = nullptr;
+  ++impl_->revision;
   const bool undone = impl_->game.undo();
   if (undone) {
     impl_->signal_search_locked();
   }
   return undone;
+}
+
+void InteractivePlay::retry_evaluation() {
+  std::lock_guard lock(impl_->mutex);
+  impl_->background_error = nullptr;
+  ++impl_->revision;
+  impl_->signal_search_locked();
 }
 
 void InteractivePlay::rethrow_background_error() {

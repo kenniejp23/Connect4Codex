@@ -45,3 +45,10 @@ Peak RSS from a single run is not a long-duration memory test.
 The repository does not contain raw reports or the temporary Rust harness for the old native
 migration measurements. Their previous tables have been removed because they cannot establish
 performance of the current engine. Run the checked-in harness to obtain a baseline for this revision.
+
+## Interactive release checks
+
+The interactive engine now calls evaluators outside its board mutex and discards results after a
+board revision changes. Native regression tests cover responsive snapshots/reset during a delayed
+callback and successful retry after failure. These correctness checks do not establish a general
+throughput improvement. Historical measurements above remain tied to their original revisions.

@@ -2,11 +2,12 @@ name: c4a0 CI
 
 on:
   push:
+  pull_request:
   workflow_dispatch:
 
 jobs:
   ci:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - uses: actions/checkout@v4
@@ -18,15 +19,29 @@ jobs:
           install: true
           cache: true
 
+      - name: Install desktop runtime libraries
+        run: sudo apt-get update && sudo apt-get install -y libegl1 libxkbcommon-x11-0 libxcb-cursor0 libopengl0 xvfb
+
       - name: Run CI tasks
         run: mise run ci
+        env:
+          QT_QPA_PLATFORM: offscreen
+
+      - name: X11 desktop interaction
+        run: xvfb-run -a env QT_QPA_PLATFORM=xcb mise exec -- uv run pytest -q tests/c4a0_tests/gui_test.py
+
+      - name: Installed wheel with locked dependencies
+        run: mise exec -- bash scripts/check-wheel.sh locked
+
+      - name: Audit locked runtime dependencies
+        run: mise exec -- uvx pip-audit==2.10.1 --disable-pip --no-deps -r constraints/linux-py311.txt
 
   native-sanitizers:
     strategy:
       fail-fast: false
       matrix:
         task: ["test:sanitize", "test:thread"]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - uses: actions/checkout@v4

@@ -288,6 +288,68 @@ TEST_CASE("interactive search preserves and rethrows background errors") {
   CHECK_THROWS_WITH(play.rethrow_background_error(), "inference failed");
 }
 
+TEST_CASE("interactive snapshots and reset remain responsive during evaluation") {
+  class DelayedEvaluator final : public Evaluator {
+   public:
+    std::atomic<int> calls{0};
+    std::vector<EvalPosResult> evaluate(
+        ModelId, const std::vector<Position>& positions) override {
+      const int call = calls.fetch_add(1);
+      if (call == 0) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+      }
+      return std::vector<EvalPosResult>(
+          positions.size(), EvalPosResult{.policy = MctsGame::kUniformPolicy,
+                                          .q_penalty = call == 0 ? 1.0F : 0.0F,
+                                          .q_no_penalty = call == 0 ? 1.0F : 0.0F});
+    }
+  } evaluator;
+  InteractivePlay play(evaluator, 1, 1.0F, 0.01F);
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (evaluator.calls.load() == 0 && std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::yield();
+  }
+  REQUIRE(evaluator.calls.load() > 0);
+  const auto started = std::chrono::steady_clock::now();
+  CHECK(play.snapshot().n_mcts_iterations == 0);
+  play.reset();
+  CHECK(std::chrono::steady_clock::now() - started < std::chrono::milliseconds(150));
+  const auto snapshot = wait_until_search_finishes(play);
+  CHECK(snapshot.pos == Position{});
+  CHECK(snapshot.q_penalty == 0.0F);
+  CHECK(evaluator.calls.load() >= 2);
+}
+
+TEST_CASE("interactive retry restarts evaluation after failure") {
+  class RecoveringEvaluator final : public Evaluator {
+   public:
+    std::atomic<bool> fail{true};
+    std::vector<EvalPosResult> evaluate(
+        ModelId, const std::vector<Position>& positions) override {
+      if (fail.load()) {
+        throw std::runtime_error("temporary failure");
+      }
+      return std::vector<EvalPosResult>(
+          positions.size(), EvalPosResult{.policy = MctsGame::kUniformPolicy,
+                                          .q_penalty = 0.0F,
+                                          .q_no_penalty = 0.0F});
+    }
+  } evaluator;
+  InteractivePlay play(evaluator, 1, 1.0F, 0.01F);
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (play.snapshot().background_running &&
+         std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::yield();
+  }
+  CHECK_THROWS_WITH(play.rethrow_background_error(), "temporary failure");
+  CHECK_THROWS_WITH(play.rethrow_background_error(), "temporary failure");
+  evaluator.fail.store(false);
+  play.retry_evaluation();
+  CHECK(wait_until_search_finishes(play).n_mcts_iterations == 1);
+  CHECK(play.make_move(3));
+  CHECK(play.snapshot().moves == std::vector<Move>{3});
+}
+
 TEST_CASE("interactive search repeatedly shuts down cleanly") {
   for (std::size_t iteration = 0; iteration < 10; ++iteration) {
     RecordingUniformEvaluator evaluator(1);

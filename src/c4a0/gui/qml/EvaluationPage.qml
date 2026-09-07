@@ -21,8 +21,8 @@ Item {
             id: tabs
             Layout.fillWidth: true
             TabButton { text: "Tournament" }
-            TabButton { text: "Solver scoring" }
-            TabButton { text: "Neural sweep" }
+            TabButton { text: "Solver scoring (legacy)" }
+            TabButton { text: "Neural sweep (legacy)" }
             TabButton { text: "MCTS sweep" }
         }
 
@@ -42,7 +42,7 @@ Item {
                 Panel {
                     id: tournamentPanel
                     objectName: "tournamentPanel"
-                    width: Math.max(page.width - 56, 1110)
+                    width: tournamentScroll.availableWidth
                     height: tournamentForm.implicitHeight + 40
                     Column {
                         id: tournamentForm
@@ -56,13 +56,13 @@ Item {
                                 title: "Round-robin tournament"
                                 subtitle: "Compare trained generations and baseline players with both seat orders."
                             }
-                            Button {
+                            PrimaryButton {
                                 Layout.alignment: Qt.AlignTop
                                 Layout.preferredWidth: 180
                                 leftPadding: 12
                                 rightPadding: 12
                                 text: Jobs.active ? "Queue tournament" : "Run tournament"
-                                highlighted: true
+
                                 onClicked: Jobs.submit("tournament", JSON.stringify({
                                     players: tournamentPlayers.text.split(",").map(function(v) { return v.trim() }),
                                     base_dir: tournamentBase.text, device: App.device,
@@ -74,24 +74,27 @@ Item {
                             }
                         }
                         LabeledField { id: tournamentPlayers; width: parent.width; label: "Players (latest, random, uniform, or gen:N)"; text: "latest, random, uniform" }
-                        RowLayout {
+                        GridLayout {
                             width: parent.width
-                            spacing: 10
-                            LabeledField { id: tournamentBase; Layout.preferredWidth: 260; Layout.minimumWidth: 260; label: "Training directory"; text: App.trainingDir }
-                            Column { Layout.preferredWidth: 145; Layout.minimumWidth: 145
+                            columns: width < 900 ? 2 : 3
+                            uniformCellWidths: true
+                            columnSpacing: 10
+                            rowSpacing: 10
+                            LabeledField { id: tournamentBase; Layout.fillWidth: true; Layout.minimumWidth: 130; label: "Training directory"; text: App.trainingDir }
+                            Column { Layout.fillWidth: true; Layout.minimumWidth: 130
                                 Text { text: "Games / match (even)"; color: ApplicationWindow.window.mutedTextColor; font.pixelSize: 11 }
                                 SpinBox { id: tournamentGames; objectName: "tournamentGames"; width: parent.width; from: 2; to: 10000; stepSize: 2; value: 2; editable: true }
                             }
-                            Column { Layout.preferredWidth: 130; Layout.minimumWidth: 130
+                            Column { Layout.fillWidth: true; Layout.minimumWidth: 130
                                 Text { text: "Batch size"; color: ApplicationWindow.window.mutedTextColor; font.pixelSize: 11 }
                                 SpinBox { id: tournamentBatch; width: parent.width; from: 1; to: 100000; value: 64; editable: true }
                             }
-                            Column { Layout.preferredWidth: 260; Layout.minimumWidth: 260
+                            Column { Layout.fillWidth: true; Layout.minimumWidth: 130
                                 Text { text: "MCTS iterations"; color: ApplicationWindow.window.mutedTextColor; font.pixelSize: 11 }
                                 SpinBox { id: tournamentMcts; width: parent.width; from: 1; to: 100000; value: 200; editable: true }
                             }
-                            LabeledField { id: tournamentExploration; Layout.preferredWidth: 135; Layout.minimumWidth: 135; label: "Exploration constant"; text: "6.6"; validator: DoubleValidator { bottom: 0 } }
-                            LabeledField { id: tournamentPly; Layout.preferredWidth: 130; Layout.minimumWidth: 130; label: "Ply penalty"; text: "0.01"; validator: DoubleValidator { bottom: 0 } }
+                            LabeledField { id: tournamentExploration; Layout.fillWidth: true; Layout.minimumWidth: 130; label: "Exploration constant"; text: "6.6"; validator: DoubleValidator { bottom: 0 } }
+                            LabeledField { id: tournamentPly; Layout.fillWidth: true; Layout.minimumWidth: 130; label: "Ply penalty"; text: "0.01"; validator: DoubleValidator { bottom: 0 } }
                         }
                         Column {
                             width: parent.width
@@ -180,11 +183,12 @@ Item {
                             LabeledField { id: scoreCache; Layout.fillWidth: true; label: "Solutions cache"; text: App.solutionsPath }
                             LabeledField { id: scoreGenerations; Layout.fillWidth: true; label: "Generations (blank selects all)"; placeholderText: "0, 4, 8" }
                         }
+                        Label { width: parent.width; wrapMode: Text.Wrap; visible: App.trainingV2 && scoreBase.text === App.trainingDir; text: "Choose a legacy training directory to score saved self-play policies." }
                         CheckBox { id: rescore; text: "Rescore generations that already have a solver score" }
-                        Button {
+                        PrimaryButton {
                             text: Jobs.active ? "Queue scoring" : "Start scoring"
-                            highlighted: true
-                            enabled: scoreSolver.text.length > 0 && scoreBook.text.length > 0
+
+                            enabled: scoreSolver.text.length > 0 && scoreBook.text.length > 0 && !(App.trainingV2 && scoreBase.text === App.trainingDir)
                             onClicked: Jobs.submit("solver_score", JSON.stringify({
                                 solver_path: scoreSolver.text, book_path: scoreBook.text,
                                 base_dir: scoreBase.text, solutions_path: scoreCache.text,
@@ -230,9 +234,12 @@ Item {
                             LabeledField { id: nnLr; Layout.fillWidth: true; label: "Learning rate min,max"; text: "0.0001, 0.01" }
                             LabeledField { id: nnL2; Layout.fillWidth: true; label: "L2 regularization min,max"; text: "0.00001, 0.001" }
                         }
-                        Button {
+                        PrimaryButton {
                             text: Jobs.active ? "Queue NN sweep" : "Start NN sweep"
-                            highlighted: true
+                            enabled: !(App.trainingV2 && nnBase.text === App.trainingDir)
+                            ToolTip.text: "Neural sweeps require a legacy training directory"
+                            ToolTip.visible: hovered && !enabled
+
                             onClicked: {
                                 var rb = page.numberList(nnResidual.text), fs = page.numberList(nnFilters.text)
                                 var pp = page.numberList(nnPolicy.text), vv = page.numberList(nnValue.text)
@@ -310,9 +317,9 @@ Item {
                             LabeledField { id: msBook; Layout.fillWidth: true; label: "Opening book"; text: App.bookPath }
                             LabeledField { id: msCache; Layout.fillWidth: true; label: "Solutions cache"; text: App.solutionsPath }
                         }
-                        Button {
+                        PrimaryButton {
                             text: Jobs.active ? "Queue MCTS sweep" : "Start MCTS sweep"
-                            highlighted: true
+
                             enabled: msSolver.text.length > 0 && msBook.text.length > 0
                             onClicked: {
                                 var games = page.numberList(msGamesRange.text)

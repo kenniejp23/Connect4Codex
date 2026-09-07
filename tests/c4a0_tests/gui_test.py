@@ -74,7 +74,7 @@ def test_qml_shell_loads_and_game_controller_accepts_moves(tmp_path):
     application.processEvents()
 
     game_controller.startGame("Human", "Human", 1, 1.0, 0.01)
-    _wait_until(application, lambda: game_controller._iterations >= 1)
+    _wait_until(application, lambda: game_controller._iterations >= 1, timeout=10)
     assert game_controller._iterations >= 1
     game_board = cast(Any, window.findChild(QObject, "gameBoard"))
     analysis = cast(Any, window.findChild(QObject, "analysisPanel"))
@@ -99,6 +99,7 @@ def test_qml_shell_loads_and_game_controller_accepts_moves(tmp_path):
     _wait_until(application, lambda: game_controller._move_count == 0)
     _wait_until(application, lambda: game_controller._iterations >= 1)
     window.requestActivate()
+    assert QTest.qWaitForWindowActive(window, 2000)
     QTest.keyClick(window, Qt.Key.Key_4)
     _wait_until(application, lambda: game_controller._move_count == 1)
     assert game_controller._board[-4] == 1
@@ -108,6 +109,9 @@ def test_qml_shell_loads_and_game_controller_accepts_moves(tmp_path):
     game_controller.shutdown()
     for root in engine.rootObjects():
         cast(Any, root).close()
+    import shiboken6
+
+    shiboken6.delete(engine)
 
 
 def test_job_manager_rejects_invalid_configuration_before_starting():
@@ -120,3 +124,37 @@ def test_job_manager_rejects_invalid_configuration_before_starting():
     assert job_id == ""
     assert not jobs.active
     assert "Invalid configuration" in jobs._result
+
+
+def test_primary_action_visible_in_both_themes_at_minimum_size(tmp_path):
+    application = _application(tmp_path)
+    controller = AppController()
+    game = GameController(controller)
+    jobs = JobManager()
+    engine = QQmlApplicationEngine()
+    for name, value in [("App", controller), ("Game", game), ("Jobs", jobs)]:
+        engine.rootContext().setContextProperty(name, value)
+    engine.load(
+        QUrl.fromLocalFile(str(Path(__file__).parents[2] / "src/c4a0/gui/qml/Main.qml"))
+    )
+    window = cast(Any, engine.rootObjects()[0])
+    window.setWidth(1024)
+    window.setHeight(720)
+    controller.setPage(1)
+    for theme in ("light", "dark"):
+        controller.setTheme(theme)
+        application.processEvents()
+        button = cast(Any, window.findChild(QObject, "startGameButton"))
+        assert button.isVisible() and button.width() >= 100 and button.height() >= 40
+        origin = button.mapToItem(window.contentItem(), QPointF(0, 0))
+        assert 0 <= origin.x() <= 1024 - button.width()
+        assert 0 <= origin.y() <= 720 - button.height()
+        # Primary action uses explicit, contrasting colors in both themes.
+        label = cast(Any, button.property("contentItem"))
+        background = cast(Any, button.property("background"))
+        assert label.property("color") != background.property("color")
+    game.shutdown()
+    window.close()
+    import shiboken6
+
+    shiboken6.delete(engine)

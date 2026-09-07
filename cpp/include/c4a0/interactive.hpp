@@ -35,6 +35,7 @@ class InteractivePlay {
   [[nodiscard]] bool make_random_move(float temperature);
   [[nodiscard]] bool make_best_move_if_ready();
   void reset();
+  void retry_evaluation();
   [[nodiscard]] bool undo();
   void rethrow_background_error();
 

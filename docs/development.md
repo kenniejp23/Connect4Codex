@@ -54,6 +54,9 @@ The entry point is [`src/c4a0/main.py`](../src/c4a0/main.py).
 | --- | --- |
 | `gui` | Launch PySide6/Qt Quick desktop UI |
 | `train` | Create/resume asynchronous V2 training |
+| `training-config` | Inspect effective V2 resume settings |
+| `export-model` | Write a compact inference artifact from a trusted V2 run |
+| `benchmark-production` | Measure the coordinator lifecycle and held-out candidate quality |
 | `train-legacy` | Run synchronous generation-based Lightning training |
 | `training-status` | Print V2 manifest and replay status as JSON |
 | `play` | Interactive terminal play, including human/human and AI/AI modes |
@@ -94,6 +97,8 @@ if MPS is unavailable. `--device` provides an explicit override.
 On resume, persisted training/search configuration takes precedence over new CLI values. The
 invocation can change `base_dir`, `device`, `max_gens`, and `max_candidate_attempts`. A run that has
 already reached its accepted-promotion limit returns immediately when no candidate is pending.
+`training-config` prints the effective configuration; the GUI loads and locks immutable fields
+when resuming. Choose an empty directory to create a different experiment.
 
 Selected CLI defaults:
 
@@ -117,7 +122,10 @@ Selected CLI defaults:
 
 The opponent weights default to 65% champion, 30% accepted archive, 2.5% uniform, and 2.5% random.
 Search uses root Dirichlet noise and temperature-controlled sampling for self-play. The arena
-uses persisted openings and paired colors with SPRT thresholds. A rejection can retain a learner
+uses persisted openings and paired colors with a five-outcome multinomial GSPRT.
+Each color-swapped pair is one observation. Budget exhaustion rejects inconclusive candidates;
+that rejection is distinct from crossing a statistical boundary. The recorded alpha/beta settings
+are not calibrated release guarantees for arbitrary production opening distributions. A rejection can retain a learner
 incumbent whose arena score meets `--learner-incumbent-min-score` (default `0.5`); otherwise the
 learner falls back to the champion or a retained qualifying incumbent.
 
@@ -137,7 +145,10 @@ training-v2/
   tensorboard/events.out.tfevents.*
 ```
 
-The coordinator writes the manifest; shards are atomically saved before registration. Replay
+The coordinator takes an exclusive Linux advisory lock before opening the writable manifest.
+Readers use read-only SQLite connections. Child processes receive SIGKILL if the coordinator
+dies. Shards are atomically saved before registration, with file and directory synchronization.
+Manifest artifact paths are run-relative; existing path records migrate transactionally on write. Replay
 retirement operates on whole shards after release by the learner. Accepted checkpoints remain;
 rejected checkpoint pruning keeps the configured recent count (default three) and any preserved
 learner incumbent. Attempt zero initializes the champion. V2 refuses legacy generation directories.
@@ -175,3 +186,27 @@ uv run optuna-dashboard sqlite:///optuna.db
 
 For measurement commands and their scope, see [native performance](native-performance.md) and
 [training benchmarks](training-benchmark.md).
+
+## Error recovery and evaluation artifacts
+
+Interactive evaluation runs outside the board mutex. Reset/moves invalidate stale results,
+callback failures have repeatable diagnostics, and `InteractivePlay.retry_evaluation()` restarts
+search on the current board. Desktop inference and model loading run in an isolated child process,
+with a 30-second request deadline and bounded termination when closing a game. Retry reloads a
+timed-out inference process. Statistics work runs asynchronously.
+Its jobs have explicit terminal states; exit without a terminal event fails. Shutdown discards queued
+starts and cancellation escalates against the active worker's process group after six seconds.
+The coordinator uses one graceful cleanup deadline, then termination and kill escalation.
+
+External solver invocations default to a 60-second deadline covering input, output, and exit.
+Set `C4A0_SOLVER_TIMEOUT_SECONDS` to a positive number up to 86400 to override it. Worker diagnostic
+logs rotate under `$XDG_STATE_HOME/c4a0/logs` (default `~/.local/state/c4a0/logs`); the UI retains
+1000 log records and 20 job results.
+
+Full learner checkpoints contain trusted resumable state and owned CPU tensor snapshots. Compact
+`export-model` artifacts contain weights, architecture, and versioned inference settings, and load
+with PyTorch's restricted weights loader. For `minimax-test --model-path` on an older standalone full
+checkpoint, pass `--trusted-checkpoint`; if inference metadata cannot be recovered from its run,
+also specify `--mcts-value-scale`. Legacy generation pickle loading remains a trusted compatibility
+path. Minimax defaults to depth six, permits depths one through twelve, and has a 300-second
+ladder deadline.

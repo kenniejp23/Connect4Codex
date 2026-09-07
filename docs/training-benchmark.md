@@ -72,14 +72,16 @@ uv run c4a0 compare-training-benchmarks \
   --output benchmark-results/comparison.json
 ```
 
-The comparison validates report format and workflow, and requires equal seed, game counts, MCTS
-iterations, inference batch size, training batch size, and optimizer steps. It does not enforce
-matching device, precision, solver/book contents, cache state, or host load; keep these comparable
-when collecting reports.
+The comparison validates supported report versions, workload fields, finite positive throughput
+and latency, and score ranges. Seed, game counts, MCTS iterations, inference/training batch sizes,
+optimizer steps, device, and precision must match. New reports also record dependency versions,
+dirty-tree state, and solver/book hashes. Historical comparisons remain separate from release
+acceptance; every comparison sets `release_approved` to false. Keep solver inputs, cache state,
+and host load comparable when collecting reports.
 
 By default, self-play, training, arena, and normalized solver throughput must each reach 90% of the
-Rust value. Candidate latency must be at most 110%. Missing required metrics or zero baseline
-metrics fail the gate. `--throughput-ratio` and `--latency-ratio` override these thresholds.
+Rust value. Candidate latency must be at most 110%. Missing solver measurements fail the gate; malformed required metrics and zero or negative
+timing/throughput raise validation errors. `--throughput-ratio` and `--latency-ratio` override these thresholds.
 A failed gate exits with status 2. The command writes a decision report; it does not switch the
 application's training implementation.
 
@@ -107,3 +109,30 @@ sizes, native workers, game concurrency, and arena concurrency. These are measur
 recorded configurations. Use the current [`TrainingV2Config`](../src/c4a0/config.py) and CLI for
 production defaults, and rerun measurements before drawing conclusions about current throughput.
 Generated checkpoints, replay files, databases, and TensorBoard logs are excluded from Git.
+
+## Production and held-out candidate measurements
+
+```sh
+uv run c4a0 benchmark-production config.json production.json --repeats 3
+```
+
+`config.json` is a `TrainingV2Config` object. Each repetition creates a temporary run and measures
+one actual asynchronous candidate decision, including replay ingestion, learning, arena evaluation,
+and checkpoint persistence. The report preserves lifecycle events, wall time, saved-snapshot
+counters, checkpoint/export sizes, and process-tree memory samples. Timing is separate from quality.
+Reports include dependency and dirty-tree provenance. RSS sums coordinator/descendant resident
+pages, so shared pages can be counted more than once. CPU time is coordinator-only; NVIDIA
+utilization is device-wide and can include unrelated applications.
+
+Saved candidates play paired matches against their parent from a fixed versioned bank of 32
+positions at plies 8–12. Selection openings are at plies 1–6 and are checked for overlap. Position
+metrics include policy entropy, divergence from the parent, and depth-three minimax action agreement;
+these are descriptive measurements, not a solver certificate or an Elo rating. Throughput never
+compensates for weaker held-out scores, and the production report does not automatically approve
+a release. Run repetitions without concurrent builds, training jobs, or competing GPU applications.
+
+The paired-outcome gate follows the constrained-multinomial likelihood approach described in
+[Stockfish's statistical documentation](https://official-stockfish.github.io/docs/fishtest-wiki/Fishtest-Mathematics.html).
+Synthetic null/alternative simulations cover draw-heavy, correlated, and independent pairs across
+batch boundaries. They do not substitute for calibration on production opening distributions;
+budget-truncated rejections are excluded from boundary-error estimates.

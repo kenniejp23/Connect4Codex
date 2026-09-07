@@ -6,19 +6,22 @@ Item {
     id: page
     objectName: "playPage"
     property bool analysisVisible: true
+    property bool editingText: ApplicationWindow.window.activeFocusItem &&
+        (ApplicationWindow.window.activeFocusItem.hasOwnProperty("text") ||
+         ApplicationWindow.window.activeFocusItem.hasOwnProperty("editable"))
     property bool compact: width < 950
 
-    Shortcut { sequence: "1"; enabled: Game.humanTurn; onActivated: Game.makeMove(0) }
-    Shortcut { sequence: "2"; enabled: Game.humanTurn; onActivated: Game.makeMove(1) }
-    Shortcut { sequence: "3"; enabled: Game.humanTurn; onActivated: Game.makeMove(2) }
-    Shortcut { sequence: "4"; enabled: Game.humanTurn; onActivated: Game.makeMove(3) }
-    Shortcut { sequence: "5"; enabled: Game.humanTurn; onActivated: Game.makeMove(4) }
-    Shortcut { sequence: "6"; enabled: Game.humanTurn; onActivated: Game.makeMove(5) }
-    Shortcut { sequence: "7"; enabled: Game.humanTurn; onActivated: Game.makeMove(6) }
-    Shortcut { sequence: "U"; enabled: Game.active; onActivated: Game.undo() }
-    Shortcut { sequence: "N"; enabled: Game.active; onActivated: Game.rematch() }
-    Shortcut { sequence: "B"; enabled: Game.active; onActivated: Game.bestMove() }
-    Shortcut { sequence: "R"; enabled: Game.active; onActivated: Game.randomMove() }
+    Shortcut { sequence: "1"; enabled: page.visible && !page.editingText && Game.humanTurn; onActivated: Game.makeMove(0) }
+    Shortcut { sequence: "2"; enabled: page.visible && !page.editingText && Game.humanTurn; onActivated: Game.makeMove(1) }
+    Shortcut { sequence: "3"; enabled: page.visible && !page.editingText && Game.humanTurn; onActivated: Game.makeMove(2) }
+    Shortcut { sequence: "4"; enabled: page.visible && !page.editingText && Game.humanTurn; onActivated: Game.makeMove(3) }
+    Shortcut { sequence: "5"; enabled: page.visible && !page.editingText && Game.humanTurn; onActivated: Game.makeMove(4) }
+    Shortcut { sequence: "6"; enabled: page.visible && !page.editingText && Game.humanTurn; onActivated: Game.makeMove(5) }
+    Shortcut { sequence: "7"; enabled: page.visible && !page.editingText && Game.humanTurn; onActivated: Game.makeMove(6) }
+    Shortcut { sequence: "U"; enabled: page.visible && !page.editingText && Game.active; onActivated: Game.undo() }
+    Shortcut { sequence: "N"; enabled: page.visible && !page.editingText && Game.active; onActivated: Game.rematch() }
+    Shortcut { sequence: "B"; enabled: page.visible && !page.editingText && Game.active; onActivated: Game.bestMove() }
+    Shortcut { sequence: "R"; enabled: page.visible && !page.editingText && Game.active; onActivated: Game.randomMove() }
 
     ColumnLayout {
         anchors.fill: parent
@@ -29,47 +32,51 @@ Item {
 
         Panel {
             Layout.fillWidth: true
-            Layout.preferredHeight: 104
-            RowLayout {
+            Layout.preferredHeight: page.compact ? 178 : 104
+            GridLayout {
+                columns: page.compact ? 3 : 6
+                uniformCellWidths: true
                 anchors.fill: parent
                 anchors.margins: 14
-                spacing: page.compact ? 8 : 14
+                columnSpacing: page.compact ? 8 : 14
+                rowSpacing: 8
 
                 Column {
-                    Layout.preferredWidth: page.compact ? 145 : 190
+                    Layout.fillWidth: true; Layout.minimumWidth: 140
                     spacing: 6
                     Text { text: "RED PLAYER"; color: ApplicationWindow.window.dangerColor; font.pixelSize: 10; font.weight: Font.DemiBold; font.letterSpacing: 1 }
-                    ComboBox { id: redPlayer; width: parent.width; height: 42; model: App.playerOptions; currentIndex: 0 }
+                    ComboBox { id: redPlayer; property string selectedPlayer: "Human"; onActivated: selectedPlayer = currentText; onModelChanged: Qt.callLater(function() { currentIndex = Math.max(0, find(selectedPlayer)) }); width: parent.width; height: 42; model: App.playerOptions; currentIndex: 0 }
                 }
-                Text { text: "VS"; color: ApplicationWindow.window.faintTextColor; font.pixelSize: 11; font.weight: Font.Bold }
                 Column {
-                    Layout.preferredWidth: page.compact ? 145 : 190
+                    Layout.fillWidth: true; Layout.minimumWidth: 140
                     spacing: 6
                     Text { text: "GOLD PLAYER"; color: ApplicationWindow.window.accentColor; font.pixelSize: 10; font.weight: Font.DemiBold; font.letterSpacing: 1 }
-                    ComboBox { id: goldPlayer; width: parent.width; height: 42; model: App.playerOptions; currentIndex: Math.max(0, find(App.preferredPlayPlayer)) }
+                    ComboBox { id: goldPlayer; property string selectedPlayer: App.preferredPlayPlayer; onActivated: selectedPlayer = currentText; onModelChanged: Qt.callLater(function() { currentIndex = Math.max(0, find(selectedPlayer)) }); width: parent.width; height: 42; model: App.playerOptions; currentIndex: Math.max(0, find(App.preferredPlayPlayer)) }
                 }
                 Column {
-                    Layout.preferredWidth: page.compact ? 96 : 122
+                    Layout.fillWidth: true; Layout.minimumWidth: 140
                     spacing: 6
                     Text { text: "MCTS ITERATIONS"; color: ApplicationWindow.window.faintTextColor; font.pixelSize: 9; font.weight: Font.DemiBold }
                     SpinBox { id: gameIterations; width: parent.width; height: 42; from: 1; to: 100000; value: 1400; editable: true }
                 }
                 Column {
-                    Layout.preferredWidth: page.compact ? 80 : 104
+                    Layout.fillWidth: true
                     spacing: 6
                     Text { text: "EXPLORATION"; color: ApplicationWindow.window.faintTextColor; font.pixelSize: 9; font.weight: Font.DemiBold }
                     TextField { id: gameExploration; width: parent.width; height: 42; text: "6.6"; validator: DoubleValidator { bottom: 0 } }
                 }
                 Column {
-                    Layout.preferredWidth: page.compact ? 72 : 92
+                    Layout.fillWidth: true
                     spacing: 6
                     Text { text: "PLY PENALTY"; color: ApplicationWindow.window.faintTextColor; font.pixelSize: 9; font.weight: Font.DemiBold }
                     TextField { id: gamePly; width: parent.width; height: 42; text: "0.01"; validator: DoubleValidator { bottom: 0 } }
                 }
-                Item { Layout.fillWidth: true }
-                Button {
+                PrimaryButton {
+                    objectName: "startGameButton"
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 48
                     text: Game.active ? (page.compact ? "Restart" : "Restart setup") : (page.compact ? "Start" : "Start game")
-                    highlighted: true
+
                     onClicked: Game.startGame(redPlayer.currentText, goldPlayer.currentText,
                                               gameIterations.value, Number(gameExploration.text), Number(gamePly.text))
                 }
@@ -98,6 +105,11 @@ Item {
                         Layout.fillWidth: true
                         Text {
                             text: Game.status
+                            Accessible.role: Accessible.StaticText
+                            Accessible.name: text
+                            onTextChanged: function() {
+                                if (page.visible && Game.active) Accessible.announce(Game.status, Accessible.Polite)
+                            }
                             color: Game.terminalState === "red_win" ? ApplicationWindow.window.dangerColor
                                  : (Game.terminalState === "gold_win" ? ApplicationWindow.window.accentColor : ApplicationWindow.window.textColor)
                             font.pixelSize: 18
@@ -218,12 +230,20 @@ Item {
                                             required property int index
                                             width: board.width / 7
                                             height: board.height
+                                            activeFocusOnTab: true
+                                            Accessible.role: Accessible.Button
+                                            Accessible.name: "Drop in column " + (index + 1)
+                                            Accessible.description: Game.status + ". Column cells top to bottom: " + Game.board.filter(function(_, i) { return i % 7 === index }).map(function(piece) { return piece === 0 ? "empty" : (piece === 1 ? "red" : "gold") }).join(", ")
+                                            Accessible.onPressAction: if (enabled) Game.makeMove(index)
+                                            Keys.onReturnPressed: if (enabled) Game.makeMove(index)
+                                            Keys.onSpacePressed: if (enabled) Game.makeMove(index)
+                                            Rectangle { anchors.fill: parent; color: "transparent"; border.width: parent.activeFocus ? 3 : 0; border.color: "white" }
                                             hoverEnabled: true
-                                            enabled: Game.humanTurn && Game.legalMoves[index]
+                                            enabled: page.visible && !page.editingText && Game.humanTurn && Game.legalMoves[index]
                                             cursorShape: enabled ? Qt.PointingHandCursor : Qt.ForbiddenCursor
                                             onEntered: previewRow.hoverColumn = index
                                             onExited: if (previewRow.hoverColumn === index) previewRow.hoverColumn = -1
-                                            onClicked: Game.makeMove(index)
+                                            onClicked: { forceActiveFocus(); Game.makeMove(index) }
                                         }
                                     }
                                 }
@@ -234,13 +254,13 @@ Item {
                     RowLayout {
                         Layout.fillWidth: true
                         spacing: page.compact ? 4 : 8
-                        Button { Layout.preferredWidth: page.compact ? 52 : implicitWidth; Layout.minimumWidth: page.compact ? 48 : implicitWidth; leftPadding: page.compact ? 8 : 24; rightPadding: page.compact ? 8 : 24; text: page.compact ? "↶" : "Undo  U"; ToolTip.visible: hovered; ToolTip.text: "Undo (U)"; enabled: Game.active && Game.moveCount > 0; onClicked: Game.undo() }
-                        Button { Layout.preferredWidth: page.compact ? 52 : implicitWidth; Layout.minimumWidth: page.compact ? 48 : implicitWidth; leftPadding: page.compact ? 8 : 24; rightPadding: page.compact ? 8 : 24; text: page.compact ? "N" : "New  N"; ToolTip.visible: hovered; ToolTip.text: "New game (N)"; enabled: Game.active; onClicked: Game.rematch() }
-                        Button { Layout.preferredWidth: page.compact ? 52 : implicitWidth; Layout.minimumWidth: page.compact ? 48 : implicitWidth; leftPadding: page.compact ? 8 : 24; rightPadding: page.compact ? 8 : 24; text: page.compact ? "B" : "Best  B"; ToolTip.visible: hovered; ToolTip.text: "Best move (B)"; enabled: Game.active && Game.terminalState === "ongoing"; onClicked: Game.bestMove() }
-                        Button { Layout.preferredWidth: page.compact ? 52 : implicitWidth; Layout.minimumWidth: page.compact ? 48 : implicitWidth; leftPadding: page.compact ? 8 : 24; rightPadding: page.compact ? 8 : 24; text: page.compact ? "R" : "Random  R"; ToolTip.visible: hovered; ToolTip.text: "Random move (R)"; enabled: Game.active && Game.terminalState === "ongoing"; onClicked: Game.randomMove() }
+                        Button { Layout.preferredWidth: page.compact ? 52 : implicitWidth; Layout.minimumWidth: page.compact ? 48 : implicitWidth; leftPadding: page.compact ? 8 : 24; rightPadding: page.compact ? 8 : 24; text: page.compact ? "↶" : "Undo  U"; ToolTip.visible: hovered; ToolTip.text: "Undo (U)"; enabled: page.visible && !page.editingText && Game.active && Game.moveCount > 0; onClicked: Game.undo() }
+                        Button { Layout.preferredWidth: page.compact ? 52 : implicitWidth; Layout.minimumWidth: page.compact ? 48 : implicitWidth; leftPadding: page.compact ? 8 : 24; rightPadding: page.compact ? 8 : 24; text: page.compact ? "N" : "New  N"; ToolTip.visible: hovered; ToolTip.text: "New game (N)"; enabled: page.visible && !page.editingText && Game.active; onClicked: Game.rematch() }
+                        Button { Layout.preferredWidth: page.compact ? 52 : implicitWidth; Layout.minimumWidth: page.compact ? 48 : implicitWidth; leftPadding: page.compact ? 8 : 24; rightPadding: page.compact ? 8 : 24; text: page.compact ? "B" : "Best  B"; ToolTip.visible: hovered; ToolTip.text: "Best move (B)"; enabled: page.visible && !page.editingText && Game.active && Game.terminalState === "ongoing"; onClicked: Game.bestMove() }
+                        Button { Layout.preferredWidth: page.compact ? 52 : implicitWidth; Layout.minimumWidth: page.compact ? 48 : implicitWidth; leftPadding: page.compact ? 8 : 24; rightPadding: page.compact ? 8 : 24; text: page.compact ? "R" : "Random  R"; ToolTip.visible: hovered; ToolTip.text: "Random move (R)"; enabled: page.visible && !page.editingText && Game.active && Game.terminalState === "ongoing"; onClicked: Game.randomMove() }
                         Item { Layout.fillWidth: true }
-                        Button { Layout.preferredWidth: page.compact ? 56 : implicitWidth; Layout.minimumWidth: page.compact ? 48 : implicitWidth; leftPadding: page.compact ? 8 : 24; rightPadding: page.compact ? 8 : 24; text: page.compact ? "+1" : "+1 MCTS"; ToolTip.visible: hovered; ToolTip.text: "Add 1 MCTS iteration"; enabled: Game.active; onClicked: Game.addIterations(1) }
-                        Button { Layout.preferredWidth: page.compact ? 64 : implicitWidth; Layout.minimumWidth: page.compact ? 52 : implicitWidth; leftPadding: page.compact ? 8 : 24; rightPadding: page.compact ? 8 : 24; text: "+100"; ToolTip.visible: hovered; ToolTip.text: "Add 100 MCTS iterations"; enabled: Game.active; onClicked: Game.addIterations(100) }
+                        Button { Layout.preferredWidth: page.compact ? 56 : implicitWidth; Layout.minimumWidth: page.compact ? 48 : implicitWidth; leftPadding: page.compact ? 8 : 24; rightPadding: page.compact ? 8 : 24; text: page.compact ? "+1" : "+1 MCTS"; ToolTip.visible: hovered; ToolTip.text: "Add 1 MCTS iteration"; enabled: page.visible && !page.editingText && Game.active; onClicked: Game.addIterations(1) }
+                        Button { Layout.preferredWidth: page.compact ? 64 : implicitWidth; Layout.minimumWidth: page.compact ? 52 : implicitWidth; leftPadding: page.compact ? 8 : 24; rightPadding: page.compact ? 8 : 24; text: "+100"; ToolTip.visible: hovered; ToolTip.text: "Add 100 MCTS iterations"; enabled: page.visible && !page.editingText && Game.active; onClicked: Game.addIterations(100) }
                     }
                 }
 
@@ -261,7 +281,7 @@ Item {
                             Text { text: Game.status; color: ApplicationWindow.window.textColor; font.pixelSize: 16; font.weight: Font.Bold }
                             Text { text: Game.moveCount + " moves completed"; color: ApplicationWindow.window.mutedTextColor; font.pixelSize: 11 }
                         }
-                        Button { text: "Rematch"; highlighted: true; onClicked: Game.rematch() }
+                        PrimaryButton { text: "Rematch"; onClicked: Game.rematch() }
                         Button { text: "Swap"; onClicked: Game.swapSides() }
                         Button { text: "Setup"; onClicked: Game.endGame() }
                     }
@@ -286,8 +306,11 @@ Item {
                     }
                     ProgressBar { Layout.fillWidth: true; from: 0; to: Math.max(1, Game.maxIterations); value: Game.iterations }
                     Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: ApplicationWindow.window.borderColor }
-                    RowLayout {
+                    GridLayout {
                         Layout.fillWidth: true
+                        columns: 2
+                        uniformCellWidths: true
+                        columnSpacing: 16
                         ColumnLayout {
                             Layout.fillWidth: true
                             Text { text: "EVALUATION"; color: ApplicationWindow.window.faintTextColor; font.pixelSize: 9 }
@@ -295,8 +318,8 @@ Item {
                         }
                         ColumnLayout {
                             Layout.fillWidth: true
-                            Text { text: "OUTLOOK"; color: ApplicationWindow.window.faintTextColor; font.pixelSize: 9 }
-                            Text { text: (Game.qNoPenalty * 100).toFixed(0) + "%"; color: Game.qNoPenalty >= 0 ? "#EF5B67" : ApplicationWindow.window.accentColor; font.pixelSize: 24; font.weight: Font.DemiBold }
+                            Text { text: "EXPECTED OUTCOME"; color: ApplicationWindow.window.faintTextColor; font.pixelSize: 9 }
+                            Text { text: (Game.qNoPenalty >= 0 ? "+" : "") + Game.qNoPenalty.toFixed(2); color: Game.qNoPenalty >= 0 ? "#EF5B67" : ApplicationWindow.window.accentColor; font.pixelSize: 24; font.weight: Font.DemiBold }
                         }
                     }
                     Text { text: "POLICY BY COLUMN"; color: ApplicationWindow.window.faintTextColor; font.pixelSize: 9; font.weight: Font.DemiBold }

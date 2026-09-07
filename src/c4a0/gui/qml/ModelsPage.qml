@@ -4,6 +4,7 @@ import QtQuick.Layouts
 
 Item {
     id: page
+    Connections { target: App; function onStatsReady(value) { page.stats = value } }
     property int selectedGeneration: -1
     property string stats: "Select a saved model to inspect its metadata."
     property var details: ({})
@@ -28,7 +29,8 @@ Item {
         Panel {
             Layout.fillWidth: true
             Layout.preferredHeight: 82
-            RowLayout {
+            Label { Layout.fillWidth: true; text: App.modelError; visible: text.length > 0; wrapMode: Text.Wrap; color: ApplicationWindow.window.dangerColor }
+        RowLayout {
                 anchors.fill: parent; anchors.margins: 14
                 LabeledField { id: modelDirectory; Layout.fillWidth: true; label: "Training directory"; text: App.trainingDir }
                 Button { text: "Load"; onClicked: { App.setTrainingDir(modelDirectory.text); App.refreshGenerations() } }
@@ -141,7 +143,7 @@ Item {
                         wrapMode: TextEdit.WrapAnywhere
                         background: Rectangle { color: ApplicationWindow.window.inputColor; radius: 9 }
                     }
-                    Button { Layout.fillWidth: true; text: "Use this model in Play"; enabled: page.selectedGeneration >= 0; highlighted: true; onClicked: App.useGenerationInPlay(page.selectedGeneration) }
+                    PrimaryButton { Layout.fillWidth: true; text: "Use this model in Play"; enabled: page.selectedGeneration >= 0; onClicked: App.useGenerationInPlay(page.selectedGeneration) }
                 }
             }
         }

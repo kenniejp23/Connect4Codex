@@ -1,0 +1,29 @@
+name: Controlled NVIDIA qualification
+on:
+  workflow_dispatch:
+    inputs:
+      soak_seconds:
+        description: Extended soak duration (release gate requires at least 28800 seconds)
+        required: true
+        default: '28800'
+        type: string
+permissions:
+  contents: read
+jobs:
+  cuda:
+    # Intentionally never triggered by untrusted pull-request code.
+    runs-on: [self-hosted, linux, x64, nvidia]
+    timeout-minutes: 600
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build locked environment
+        run: mise run build
+      - name: CUDA recovery and soak
+        env:
+          SOAK_SECONDS: ${{ inputs.soak_seconds }}
+        run: mise exec -- uv run python scripts/qualify-training.py --device cuda --inject-oom --seconds "$SOAK_SECONDS" --output qualification/cuda.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: nvidia-qualification
+          path: qualification/

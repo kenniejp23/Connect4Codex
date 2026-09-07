@@ -1,4 +1,5 @@
 import functools
+from pathlib import Path
 from typing import Callable, List, Optional
 
 from loguru import logger
@@ -6,6 +7,7 @@ import optuna
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import EarlyStopping
 
+from c4a0.training_common import TrainingCancelled
 from c4a0.training import SampleDataModule, TrainingGen
 from c4a0.nn import ConnectFourNet, ModelConfig
 from c4a0.config import NNSweepConfig
@@ -13,6 +15,8 @@ from c4a0_cpp import Sample  # type: ignore
 
 
 def load_samples(base_dir: str, n_gens: int = 5) -> List[Sample]:
+    if (Path(base_dir) / "run.sqlite3").is_file():
+        raise ValueError("Neural sweeps require legacy training samples, not a V2 run")
     gens = TrainingGen.load_all(base_dir)[:n_gens]
     game_results = [gen.get_games(base_dir) for gen in gens]
     samples = [
@@ -25,7 +29,32 @@ def load_samples(base_dir: str, n_gens: int = 5) -> List[Sample]:
     return samples
 
 
-def objective(trial: optuna.Trial, samples: List[Sample], config: NNSweepConfig):
+class _CancellationCallback(pl.Callback):
+    def __init__(self, should_cancel):
+        self.should_cancel = should_cancel
+
+    def on_train_batch_start(self, trainer, pl_module, batch, batch_idx):
+        self._check()
+
+    def on_validation_batch_start(
+        self, trainer, pl_module, batch, batch_idx, dataloader_idx=0
+    ):
+        self._check()
+
+    def _check(self):
+        if self.should_cancel is not None and self.should_cancel():
+            raise TrainingCancelled("Neural sweep cancelled")
+
+
+def objective(
+    trial: optuna.Trial,
+    samples: List[Sample],
+    config: NNSweepConfig,
+    should_cancel=None,
+):
+    if len(samples) < 4:
+        raise ValueError("Neural sweeps require at least four legacy training samples")
+    _CancellationCallback(should_cancel)._check()
     model_config = ModelConfig(
         n_residual_blocks=trial.suggest_int(
             "n_residual_blocks",
@@ -66,10 +95,12 @@ def objective(trial: optuna.Trial, samples: List[Sample], config: NNSweepConfig)
         accelerator="auto",
         devices="auto",
         callbacks=[
+            _CancellationCallback(should_cancel),
             EarlyStopping(monitor="val_loss", patience=4, mode="min"),
         ],
         enable_progress_bar=False,  # Disable progress bar for cleaner logs
         enable_model_summary=False,
+        default_root_dir=str(Path(config.base_dir) / "sweeps"),
     )
 
     trainer.fit(model, data_module)
@@ -92,6 +123,12 @@ def perform_hparam_sweep_config(
 ):
     samples = load_samples(config.base_dir, config.n_gens)
 
+    if len(samples) < 4:
+        raise ValueError(
+            "Neural sweeps require legacy training data with at least four samples"
+        )
+    _CancellationCallback(should_cancel)._check()
+
     storage_name = f"sqlite:///{config.study_name}.db"
     study = optuna.create_study(
         study_name=config.study_name,
@@ -110,9 +147,10 @@ def perform_hparam_sweep_config(
             study.stop()
 
     study.optimize(
-        functools.partial(objective, samples=samples, config=config),
+        functools.partial(
+            objective, samples=samples, config=config, should_cancel=should_cancel
+        ),
         n_trials=config.n_trials,
-        catch=(Exception,),
         callbacks=[on_trial_complete],
     )
 

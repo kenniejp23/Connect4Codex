@@ -11,7 +11,11 @@ from c4a0.utils import get_torch_device
 
 
 class StrictConfig(BaseModel):
-    model_config = {"extra": "forbid", "validate_assignment": True}
+    model_config = {
+        "extra": "forbid",
+        "validate_assignment": True,
+        "allow_inf_nan": False,
+    }
 
 
 class TrainingConfig(StrictConfig):
@@ -170,6 +174,34 @@ class TrainingV2Config(StrictConfig):
             raise ValueError("debt resume watermark must be below pause watermark")
         TrainingConfig(lr_schedule=self.lr_schedule)
         return self
+
+    @classmethod
+    def preset(cls, name: str) -> "TrainingV2Config":
+        name = name.lower()
+        if name == "cpu":
+            return cls(
+                device="cpu",
+                replay_warmup_games=256,
+                self_play_batch_games=256,
+                n_mcts_iterations=100,
+                inference_batch_size=64,
+                training_batch_size=128,
+                conv_filter_size=16,
+                n_policy_layers=2,
+                n_value_layers=1,
+                max_gens=3,
+            )
+        if name == "balanced":
+            return cls(
+                device=str(get_torch_device()),
+                replay_warmup_games=1024,
+                n_mcts_iterations=600,
+                training_batch_size=256,
+                max_gens=5,
+            )
+        if name == "gpu":
+            return cls(device="cuda", max_gens=10)
+        raise ValueError(f"Unknown training preset: {name}")
 
 
 class TournamentConfig(StrictConfig):

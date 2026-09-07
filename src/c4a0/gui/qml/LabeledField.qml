@@ -9,6 +9,7 @@ Column {
     property alias validator: field.validator
     property alias inputMethodHints: field.inputMethodHints
     property alias field: field
+    signal editingFinished()
     spacing: 6
 
     Text {
@@ -19,6 +20,8 @@ Column {
     }
     TextField {
         id: field
+        Accessible.name: root.label
+        onEditingFinished: root.editingFinished()
         width: parent.width
         height: 44
         implicitWidth: 120

@@ -111,7 +111,7 @@ ApplicationWindow {
                             }
                             Text {
                                 width: parent.width - 20
-                                text: Jobs.active ? Jobs.currentTitle : "Compute queue idle"
+                                text: Jobs.active ? Jobs.currentTitle : "Queue idle"
                                 elide: Text.ElideRight
                                 color: rootWindow.textColor
                                 font.pixelSize: 12
@@ -188,7 +188,7 @@ ApplicationWindow {
         standardButtons: Dialog.Cancel | Dialog.Ok
         onAccepted: {
             rootWindow.pendingExit = true
-            Jobs.cancel()
+            Jobs.shutdown()
         }
         Text {
             text: "Cancel the active job and close after it has stopped?"

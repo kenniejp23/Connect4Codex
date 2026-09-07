@@ -20,9 +20,9 @@ Item {
                     Text { text: App.sourceCheckout ? "Run the same lint, type, native, Python, and CI profiles used by the project." : "Validation is available only from a source checkout containing mise.toml."; color: ApplicationWindow.window.mutedTextColor; font.pixelSize: 12; wrapMode: Text.WordWrap; Layout.fillWidth: true }
                 }
                 ComboBox { id: profile; Layout.preferredWidth: 180; model: ["lint", "typecheck", "test:cpp", "test:python", "check", "ci"]; currentIndex: 4 }
-                Button {
+                PrimaryButton {
                     text: Jobs.active ? "Queue validation" : "Run validation"
-                    highlighted: true
+
                     enabled: App.sourceCheckout
                     onClicked: Jobs.submit("validation", JSON.stringify({ profile: profile.currentText, project_dir: "." }), "Validation: " + profile.currentText)
                 }

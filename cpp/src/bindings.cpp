@@ -61,7 +61,8 @@ Array owned_array(std::vector<float> values, Shape... shape) {
 
 class PythonEvaluator final : public Evaluator {
  public:
-  explicit PythonEvaluator(nb::object callback) : callback_(std::move(callback)) {}
+  explicit PythonEvaluator(nb::object callback, bool repeatable_errors = false)
+      : callback_(std::move(callback)), repeatable_errors_(repeatable_errors) {}
 
   std::vector<EvalPosResult> evaluate(ModelId model_id,
                                       const std::vector<Position>& positions) override {
@@ -75,7 +76,17 @@ class PythonEvaluator final : public Evaluator {
 
     auto batch = owned_array<PositionBatch>(std::move(buffer), positions.size(),
                                             kBufferChannels, kRows, kCols);
-    nb::object raw_result = callback_(model_id, batch);
+    nb::object raw_result;
+    try {
+      raw_result = callback_(model_id, batch);
+    } catch (const nb::python_error& error) {
+      // python_error can only be restored once. Interactive errors are reported
+      // repeatedly, so capture diagnostics while holding the GIL instead.
+      if (repeatable_errors_) {
+        throw std::runtime_error(error.what());
+      }
+      throw;
+    }
     if (!nb::isinstance<nb::tuple>(raw_result)) {
       throw std::invalid_argument(
           "evaluation callback must return a three-element tuple");
@@ -136,6 +147,7 @@ class PythonEvaluator final : public Evaluator {
 
  private:
   nb::object callback_;
+  bool repeatable_errors_;
 };
 
 struct PythonGameSnapshot {
@@ -234,7 +246,7 @@ class PythonInteractivePlay {
   PythonInteractivePlay(nb::object callback, std::size_t max_mcts_iterations,
                         float c_exploration, float c_ply_penalty, ModelId red_model_id,
                         ModelId gold_model_id)
-      : evaluator_(std::make_unique<PythonEvaluator>(std::move(callback))),
+      : evaluator_(std::make_unique<PythonEvaluator>(std::move(callback), true)),
         game_(std::make_unique<InteractivePlay>(
             *evaluator_, max_mcts_iterations, c_exploration, c_ply_penalty, Position{},
             GameMetadata{.game_id = 0,
@@ -290,6 +302,11 @@ class PythonInteractivePlay {
   void reset() {
     require_open();
     game_->reset();
+  }
+
+  void retry_evaluation() {
+    require_open();
+    game_->retry_evaluation();
   }
 
   void close() { game_.reset(); }
@@ -398,6 +415,8 @@ NB_MODULE(_native, module) {
                &PythonInteractivePlay::increase_mcts_iterations, "count"_a,
                nb::call_guard<nb::gil_scoped_release>())
           .def("undo", &PythonInteractivePlay::undo,
+               nb::call_guard<nb::gil_scoped_release>())
+          .def("retry_evaluation", &PythonInteractivePlay::retry_evaluation,
                nb::call_guard<nb::gil_scoped_release>())
           .def("reset", &PythonInteractivePlay::reset,
                nb::call_guard<nb::gil_scoped_release>())

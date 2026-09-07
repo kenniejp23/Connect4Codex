@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import sys
 from typing import Any
@@ -12,17 +13,18 @@ from PySide6.QtGui import QGuiApplication
 from PySide6.QtQml import QQmlApplicationEngine
 from PySide6.QtQuickControls2 import QQuickStyle
 import torch
+import shiboken6
 
 import c4a0_cpp
+from c4a0.config import TrainingV2Config
 from c4a0.training import TrainingGen
-from c4a0.tournament import ModelID, ModelPlayer, RandomPlayer, UniformPlayer
+from c4a0.gui.inference import ProcessEvaluator, build_players
 from c4a0.utils import get_torch_device
 from c4a0.gui.jobs import JobManager
 from c4a0.training_v2 import (
+    effective_training_config,
     is_v2_run,
     list_attempts,
-    load_attempt_model,
-    load_champion_model,
     training_status,
 )
 
@@ -41,6 +43,10 @@ def _configured_training_dir(settings: QSettings) -> str:
 
 class AppController(QObject):
     changed = Signal()
+    statsReady = Signal(str)
+    modelsChanged = Signal()
+    _modelsReady = Signal(int, object)
+    _statsFinished = Signal(int, str)
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -60,6 +66,15 @@ class AppController(QObject):
         )
         self._device = str(get_torch_device())
         self._generations: list[dict[str, Any]] = []
+        self._model_error = ""
+        self._training_v2 = True
+        self._refresh_revision = 0
+        self._stats_revision = 0
+        self._statsFinished.connect(self._apply_stats)
+        self._executor = ThreadPoolExecutor(
+            max_workers=2, thread_name_prefix="c4a0-data"
+        )
+        self._modelsReady.connect(self._apply_models)
         self.refreshGenerations()
 
     @Property(int, notify=changed)
@@ -72,12 +87,28 @@ class AppController(QObject):
 
     @Property(bool, notify=changed)
     def trainingV2(self) -> bool:
-        if is_v2_run(self._training_dir):
-            return True
+        return self._training_v2
+
+    @Property(str, notify=changed)
+    def modelError(self) -> str:
+        return self._model_error
+
+    @Slot(str, result=str)
+    def trainingPreset(self, name: str) -> str:
+        return TrainingV2Config.preset(name).model_dump_json()
+
+    @Slot(str, result=str)
+    def trainingConfiguration(self, directory: str) -> str:
         try:
-            return not TrainingGen.load_all(self._training_dir)
-        except Exception:
-            return True
+            config = effective_training_config(TrainingV2Config(base_dir=directory))
+            return json.dumps(
+                {
+                    "resume": is_v2_run(directory),
+                    "config": config.model_dump(mode="json"),
+                }
+            )
+        except Exception as error:
+            return json.dumps({"error": str(error)})
 
     @Property(str, notify=changed)
     def modelCollectionName(self) -> str:
@@ -107,6 +138,19 @@ class AppController(QObject):
     def device(self) -> str:
         return self._device
 
+    @Property(str, notify=changed)
+    def interactiveDevice(self) -> str:
+        return str(self._settings.value("compute/interactiveDevice", "cpu"))
+
+    @Slot(str)
+    def setInteractiveDevice(self, device: str) -> None:
+        if device not in {"cpu", "cuda"} or (
+            device == "cuda" and not torch.cuda.is_available()
+        ):
+            return
+        self._settings.setValue("compute/interactiveDevice", device)
+        self.changed.emit()
+
     @Property(bool, constant=True)
     def cudaAvailable(self) -> bool:
         return torch.cuda.is_available()
@@ -115,7 +159,7 @@ class AppController(QObject):
     def sourceCheckout(self) -> bool:
         return (Path.cwd() / "mise.toml").is_file()
 
-    @Property(list, notify=changed)
+    @Property(list, notify=modelsChanged)
     def generations(self) -> list[dict[str, Any]]:
         return self._generations
 
@@ -129,7 +173,7 @@ class AppController(QObject):
         )
         return f"Champion {champion['generation']}"
 
-    @Property(list, notify=changed)
+    @Property(list, notify=modelsChanged)
     def playerOptions(self) -> list[str]:
         options = ["Human", "Latest Model"]
         label = "Attempt" if self.trainingV2 else "Generation"
@@ -153,6 +197,9 @@ class AppController(QObject):
         if normalized == self._training_dir:
             return
         self._training_dir = normalized
+        self._stats_revision += 1
+        self._generations = []
+        self.modelsChanged.emit()
         self._settings.setValue("paths/training", normalized)
         self.refreshGenerations()
 
@@ -180,43 +227,68 @@ class AppController(QObject):
 
     @Slot()
     def refreshGenerations(self) -> None:
-        if is_v2_run(self._training_dir):
+        self._refresh_revision += 1
+        revision, directory = self._refresh_revision, self._training_dir
+        self._model_error = "Loading models…"
+        self.changed.emit()
+
+        def collect():
             try:
-                self._generations = [
-                    {
-                        "generation": int(item["attempt_n"]),
-                        "created": str(item["created_at"])[:16].replace("T", " "),
-                        "valLoss": item["val_loss"],
-                        "solverScore": None,
-                        "mctsIterations": 0,
-                        "exploration": 0.0,
-                        "status": item["status"],
-                        "isChampion": item["is_champion"],
-                    }
-                    for item in list_attempts(self._training_dir)
-                    if Path(item["checkpoint_path"]).is_file()
-                ]
-            except Exception:
-                self._generations = []
-            self.changed.emit()
+                v2 = is_v2_run(directory)
+                if v2:
+                    config = effective_training_config(
+                        TrainingV2Config(base_dir=directory)
+                    )
+                    models = [
+                        {
+                            "generation": int(item["attempt_n"]),
+                            "created": str(item["created_at"])[:16].replace("T", " "),
+                            "valLoss": item["val_loss"],
+                            "solverScore": None,
+                            "mctsIterations": config.n_mcts_iterations,
+                            "exploration": config.c_exploration,
+                            "status": item["status"],
+                            "isChampion": item["is_champion"],
+                        }
+                        for item in list_attempts(directory)
+                        if Path(item["checkpoint_path"]).is_file()
+                    ]
+                else:
+                    generations = TrainingGen.load_all(directory)
+                    v2 = not generations
+                    models = [
+                        {
+                            "generation": generation.gen_n,
+                            "created": generation.created_at.strftime("%Y-%m-%d %H:%M"),
+                            "valLoss": generation.val_loss,
+                            "solverScore": generation.solver_score,
+                            "mctsIterations": generation.n_mcts_iterations,
+                            "exploration": generation.c_exploration,
+                        }
+                        for generation in generations
+                    ]
+                return models, v2, ""
+            except Exception as error:
+                return (
+                    [],
+                    is_v2_run(directory),
+                    f"Cannot read models in {directory}: {error}",
+                )
+
+        future = self._executor.submit(collect)
+        future.add_done_callback(
+            lambda result: self._modelsReady.emit(revision, result.result())
+        )
+
+    @Slot(int, object)
+    def _apply_models(self, revision, result):
+        if revision != self._refresh_revision:
             return
-        try:
-            generations = TrainingGen.load_all(self._training_dir)
-        except (FileNotFoundError, NotADirectoryError):
-            generations = []
-        except Exception:
-            generations = []
-        self._generations = [
-            {
-                "generation": generation.gen_n,
-                "created": generation.created_at.strftime("%Y-%m-%d %H:%M"),
-                "valLoss": generation.val_loss,
-                "solverScore": generation.solver_score,
-                "mctsIterations": generation.n_mcts_iterations,
-                "exploration": generation.c_exploration,
-            }
-            for generation in generations
-        ]
+        models, self._training_v2, self._model_error = result
+        if not self._model_error:
+            if self._generations != models:
+                self._generations = models
+                self.modelsChanged.emit()
         self.changed.emit()
 
     @Slot(int)
@@ -232,27 +304,45 @@ class AppController(QObject):
 
     @Slot(int, result=str)
     def generationStats(self, generation_number: int) -> str:
+        directory = self._training_dir
+        self._stats_revision += 1
+        revision = self._stats_revision
+        future = self._executor.submit(
+            self._generation_stats, directory, generation_number
+        )
+        future.add_done_callback(
+            lambda result: self._statsFinished.emit(revision, result.result())
+        )
+        return "Loading model statistics…"
+
+    @Slot(int, str)
+    def _apply_stats(self, revision: int, value: str) -> None:
+        if revision == self._stats_revision:
+            self.statsReady.emit(value)
+
+    @staticmethod
+    def _generation_stats(directory: str, generation_number: int) -> str:
         try:
-            if is_v2_run(self._training_dir):
+            if is_v2_run(directory):
                 attempt = next(
                     item
-                    for item in list_attempts(self._training_dir)
+                    for item in list_attempts(directory)
                     if int(item["attempt_n"]) == generation_number
                 )
                 return json.dumps(
-                    {"attempt": attempt, "run": training_status(self._training_dir)},
+                    {"attempt": attempt, "run": training_status(directory)},
                     indent=2,
                     default=str,
                 )
             generation = next(
                 item
-                for item in TrainingGen.load_all(self._training_dir)
+                for item in TrainingGen.load_all(directory)
                 if item.gen_n == generation_number
             )
-            games = generation.get_games(self._training_dir)
+            games = generation.get_games(directory)
             payload = {
                 "generation": generation.gen_n,
-                "artifact": generation.gen_folder(self._training_dir),
+                "artifact": generation.gen_folder(directory),
                 "mctsIterations": generation.n_mcts_iterations,
                 "exploration": generation.c_exploration,
                 "plyPenalty": generation.c_ply_penalty,
@@ -283,22 +373,15 @@ class AppController(QObject):
             return json.dumps({"error": str(error)}, indent=2)
 
 
-class EvaluatorRouter:
-    def __init__(self, evaluators: dict[int, Any]) -> None:
-        self.evaluators = evaluators
-
-    def forward_numpy(self, model_id, positions):
-        return self.evaluators[int(model_id)].forward_numpy(positions)
-
-
 class GameController(QObject):
     changed = Signal()
+    _loaded = Signal(int, object)
 
     def __init__(self, app: AppController, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._app = app
         self._game = None
-        self._router: EvaluatorRouter | None = None
+        self._router: ProcessEvaluator | None = None
         self._board = [0] * 42
         self._legal = [True] * 7
         self._winning: set[int] = set()
@@ -319,6 +402,11 @@ class GameController(QObject):
         self._red_spec = "Human"
         self._gold_spec = "Latest Model"
         self._auto = {"red": False, "gold": True}
+        self._load_revision = 0
+        self._executor = ThreadPoolExecutor(
+            max_workers=2, thread_name_prefix="c4a0-play"
+        )
+        self._loaded.connect(self._apply_loaded)
         self._timer = QTimer(self)
         self._timer.setInterval(75)
         self._timer.timeout.connect(self._poll)
@@ -405,43 +493,6 @@ class GameController(QObject):
     def isWinningCell(self, index: int) -> bool:
         return index in self._winning
 
-    def _player(self, spec: str, model_id: int):
-        identifier = ModelID(model_id)
-        if spec in {"Human", "Uniform"}:
-            return UniformPlayer(identifier)
-        if spec == "Random":
-            return RandomPlayer(identifier)
-        if is_v2_run(self._app._training_dir):
-            if spec == "Latest Model":
-                model = load_champion_model(self._app._training_dir)
-            elif spec.startswith(("Attempt ", "Generation ")):
-                number = int(spec.split(maxsplit=1)[1])
-                model = load_attempt_model(self._app._training_dir, number)
-            else:
-                raise ValueError(f"Unknown player type: {spec}")
-            return ModelPlayer(identifier, model, torch.device(self._app._device))
-        generations = TrainingGen.load_all(self._app._training_dir)
-        if not generations:
-            raise FileNotFoundError(
-                "No trained model is available. Choose Human, Random, or Uniform."
-            )
-        if spec == "Latest Model":
-            generation = generations[0]
-        elif spec.startswith("Generation "):
-            number = int(spec.removeprefix("Generation "))
-            generation = next(
-                (item for item in generations if item.gen_n == number), None
-            )
-            if generation is None:
-                raise ValueError(f"Generation {number} was not found")
-        else:
-            raise ValueError(f"Unknown player type: {spec}")
-        return ModelPlayer(
-            identifier,
-            generation.get_model(self._app._training_dir),
-            torch.device(self._app._device),
-        )
-
     @Slot(str, str, int, float, float)
     def startGame(
         self,
@@ -452,32 +503,51 @@ class GameController(QObject):
         ply_penalty: float,
     ) -> None:
         self.shutdown()
-        try:
-            red = self._player(red_spec, 0)
-            gold = self._player(gold_spec, 1)
-            self._router = EvaluatorRouter({0: red, 1: gold})
-            self._game = c4a0_cpp.InteractivePlay(
-                self._router.forward_numpy,
-                max(1, iterations),
-                max(0.0, exploration),
-                max(0.0, ply_penalty),
-                0,
-                1,
-            )
-            self._red_spec = red_spec
-            self._gold_spec = gold_spec
-            self._exploration = exploration
-            self._ply_penalty = ply_penalty
-            self._auto = {
-                "red": red_spec != "Human",
-                "gold": gold_spec != "Human",
-            }
-            self._error = ""
-            self._poll()
-        except Exception as error:
-            self._error = str(error)
-            self._status = "Could not start game"
+        revision = self._load_revision
+        directory = self._app._training_dir
+        # Interactive CPU inference avoids competing with CUDA training by default.
+        device = str(self._app._settings.value("compute/interactiveDevice", "cpu"))
+        self._red_spec, self._gold_spec = red_spec, gold_spec
+        self._exploration, self._ply_penalty = exploration, ply_penalty
+        self._auto = {"red": red_spec != "Human", "gold": gold_spec != "Human"}
+        self._status, self._error = "Loading players…", ""
+        self.changed.emit()
+
+        def build():
+            try:
+                router = ProcessEvaluator(
+                    build_players, (red_spec, gold_spec, directory, device)
+                )
+                game = c4a0_cpp.InteractivePlay(
+                    router.forward_numpy,
+                    max(1, iterations),
+                    max(0.0, exploration),
+                    max(0.0, ply_penalty),
+                    0,
+                    1,
+                )
+                return game, router, None
+            except Exception as error:
+                return None, None, str(error)
+
+        future = self._executor.submit(build)
+        future.add_done_callback(
+            lambda result: self._loaded.emit(revision, result.result())
+        )
+
+    @Slot(int, object)
+    def _apply_loaded(self, revision, result):
+        game, router, error = result
+        if revision != self._load_revision:
+            if game is not None:
+                self._executor.submit(self._close_game, game, router)
+            return
+        self._game, self._router = game, router
+        if error is not None:
+            self._error, self._status = error, "Could not start game"
             self.changed.emit()
+        else:
+            self._poll()
 
     @Slot(int)
     def makeMove(self, column: int) -> None:
@@ -568,6 +638,7 @@ class GameController(QObject):
         if self._game is None or not self._error:
             return
         self._error = ""
+        self._game.retry_evaluation()
         self._status = "Retrying evaluation"
         self._poll()
 
@@ -616,9 +687,16 @@ class GameController(QObject):
         except Exception as error:
             self._set_error(error)
 
+    @staticmethod
+    def _close_game(game, router):
+        if router is not None:
+            router.close()
+        game.close()
+
     def shutdown(self) -> None:
+        self._load_revision += 1
         if self._game is not None:
-            self._game.close()
+            self._executor.submit(self._close_game, self._game, self._router)
         self._game = None
         self._router = None
 
@@ -648,4 +726,5 @@ def run_gui() -> int:
         return 0
     exit_code = application.exec()
     game_controller.shutdown()
+    shiboken6.delete(engine)
     return exit_code

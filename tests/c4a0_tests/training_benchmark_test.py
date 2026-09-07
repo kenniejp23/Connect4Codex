@@ -9,10 +9,13 @@ from c4a0.training_benchmark import (
 def _report(workflow, scale=1.0, solver=True):
     return {
         "format": BENCHMARK_FORMAT,
+        "version": 1,
         "workflow": workflow,
         "revision": workflow,
         "config": {
             "seed": 1337,
+            "device": "cpu",
+            "precision": "32-true",
             "games": 64,
             "arena_games": 32,
             "mcts_iterations": 64,
@@ -47,3 +50,22 @@ def test_replacement_gate_rejects_mismatched_workloads():
     legacy["config"]["games"] = 32
     with pytest.raises(ValueError, match="different fixed workloads"):
         compare_training_benchmarks(_report("v2"), legacy)
+
+
+@pytest.mark.parametrize(
+    "defect", ["version", "workload", "infinite", "negative", "score"]
+)
+def test_invalid_reports_never_approve(defect):
+    report = _report("v2")
+    if defect == "version":
+        report["version"] = 99
+    elif defect == "workload":
+        report["config"] = {}
+    elif defect == "infinite":
+        report["metrics"]["games_per_second"] = float("inf")
+    elif defect == "negative":
+        report["metrics"]["candidate_latency_seconds"] = -1
+    else:
+        report["metrics"]["solver_score"] = 1.1
+    with pytest.raises(ValueError):
+        compare_training_benchmarks(report, _report("legacy-rust"))

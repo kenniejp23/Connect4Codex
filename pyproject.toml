@@ -8,22 +8,26 @@ dependencies = [
   "numpy>=2.4.6",
   "einops>=0.8.2",
   "torchmetrics>=1.9.0",
-  "tensorboardx>=2.6.5",
   "tensorboard>=2.21.0",
   "tqdm>=4.68.3",
-  "jupyterlab>=4.6.1",
   "pydantic>=2.13.4",
   "tabulate>=0.10.0",
-  "matplotlib>=3.11.0",
   "loguru>=0.7.3",
   "typer>=0.26.8",
   "optuna>=4.9.0",
-  "optuna-dashboard>=0.20.0",
-  "torch>=2.12.1",
+  "torch>=2.13.0",
   "pyside6>=6.10.0,<6.11",
 ]
 readme = "README.md"
 requires-python = ">= 3.11"
+
+[project.optional-dependencies]
+research = [
+  "tensorboardx>=2.6.5",
+  "jupyterlab>=4.6.1",
+  "matplotlib>=3.11.0",
+  "optuna-dashboard>=0.20.0",
+]
 
 [project.scripts]
 c4a0 = "c4a0.main:app"

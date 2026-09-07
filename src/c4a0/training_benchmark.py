@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import importlib.metadata
+import math
 import platform
 from dataclasses import dataclass
 from pathlib import Path
@@ -53,6 +56,79 @@ class TrainingBenchmarkConfig(BaseModel):
             raise ValueError("benchmark game counts must be even")
         if bool(self.solver_path) != bool(self.book_path):
             raise ValueError("solver executable and book must be supplied together")
+
+
+class BenchmarkWorkload(BaseModel):
+    model_config = {"allow_inf_nan": False}
+    seed: int = Field(ge=0)
+    games: int = Field(gt=0)
+    arena_games: int = Field(gt=0)
+    mcts_iterations: int = Field(gt=0)
+    inference_batch_size: int = Field(gt=0)
+    training_batch_size: int = Field(ge=2)
+    training_steps: int = Field(gt=0)
+    device: str
+    precision: str
+
+
+class BenchmarkMetrics(BaseModel):
+    model_config = {"allow_inf_nan": False, "extra": "allow"}
+    games_per_second: float = Field(gt=0)
+    train_positions_per_second: float = Field(gt=0)
+    arena_games_per_second: float = Field(gt=0)
+    candidate_latency_seconds: float = Field(gt=0)
+    solver_score_per_wall_clock_hour: float | None = Field(default=None, gt=0)
+    solver_score: float | None = Field(default=None, ge=0, le=1)
+
+
+class BenchmarkReport(BaseModel):
+    format: Literal["c4a0-training-benchmark"]
+    version: Literal[1]
+    workflow: Literal["v2", "legacy-rust"]
+    revision: str = Field(min_length=1)
+    config: BenchmarkWorkload
+    metrics: BenchmarkMetrics
+
+
+def validate_benchmark_report(report: dict[str, Any]) -> BenchmarkReport:
+    validated = BenchmarkReport.model_validate(report)
+
+    def finite(value):
+        if isinstance(value, float) and not math.isfinite(value):
+            raise ValueError("Benchmark reports cannot contain non-finite numbers")
+        if isinstance(value, dict):
+            for item in value.values():
+                finite(item)
+        elif isinstance(value, list):
+            for item in value:
+                finite(item)
+
+    finite(report)
+    return validated
+
+
+def benchmark_provenance(config) -> dict[str, Any]:
+    def identity(path):
+        if path is None:
+            return None
+        source = Path(path)
+        with source.open("rb") as stream:
+            digest = hashlib.file_digest(stream, "sha256").hexdigest()
+        return {"name": source.name, "sha256": digest}
+
+    dirty = subprocess.run(
+        ["git", "status", "--porcelain"], capture_output=True, text=True
+    )
+    return {
+        "dirty_tree": bool(dirty.stdout) if dirty.returncode == 0 else None,
+        "dependencies": {
+            name: importlib.metadata.version(name)
+            for name in ("torch", "numpy", "pytorch-lightning", "pyside6")
+        },
+        "solver": identity(getattr(config, "solver_path", None)),
+        "book": identity(getattr(config, "book_path", None)),
+        "purpose": "component benchmark; historical comparison is not release acceptance",
+    }
 
 
 class _Router:
@@ -150,9 +226,7 @@ def _v2_play(
     options.worker_threads = config.mcts_worker_threads
     requests = [
         c4a0_cpp.GameRequest(
-            c4a0_cpp.GameMetadata(
-                item.game_id, item.player0_id, item.player1_id
-            ),
+            c4a0_cpp.GameMetadata(item.game_id, item.player0_id, item.player1_id),
             [],
         )
         for item in metadata
@@ -198,7 +272,10 @@ def _sample_batch(games: Any, batch_size: int, seed: int):
     rng = np.random.default_rng(seed)
     indices = rng.integers(0, len(samples), size=batch_size)
     values = [samples[int(index)].to_numpy() for index in indices]
-    return tuple(torch.stack([torch.from_numpy(item[column]) for item in values]) for column in range(4))
+    return tuple(
+        torch.stack([torch.from_numpy(item[column]) for item in values])
+        for column in range(4)
+    )
 
 
 def _train_fixed_work(
@@ -238,7 +315,10 @@ def _train_fixed_work(
         scaler.update()
     if device.type == "cuda":
         torch.cuda.synchronize(device)
-    return time.perf_counter() - started, config.training_steps * config.training_batch_size
+    return (
+        time.perf_counter() - started,
+        config.training_steps * config.training_batch_size,
+    )
 
 
 def _one_run(config: TrainingBenchmarkConfig) -> dict[str, Any]:
@@ -257,9 +337,7 @@ def _one_run(config: TrainingBenchmarkConfig) -> dict[str, Any]:
     monitor.start()
 
     try:
-        metadata = [
-            _Metadata(game_id, 0, 0) for game_id in range(1, config.games + 1)
-        ]
+        metadata = [_Metadata(game_id, 0, 0) for game_id in range(1, config.games + 1)]
         started = time.perf_counter()
         with monitor.phase("self_play"):
             games = play(metadata, config, router, arena=False)
@@ -309,9 +387,7 @@ def _one_run(config: TrainingBenchmarkConfig) -> dict[str, Any]:
         "arena_games_per_second": len(arena.results) / arena_seconds,
         "solver_score": solver_score,
         "solver_score_per_wall_clock_hour": (
-            None
-            if solver_score is None
-            else solver_score * 3600.0 / wall_clock_seconds
+            None if solver_score is None else solver_score * 3600.0 / wall_clock_seconds
         ),
         "wall_clock_seconds": wall_clock_seconds,
         "self_play_seconds": self_play_seconds,
@@ -343,6 +419,7 @@ def run_training_benchmark(config: TrainingBenchmarkConfig) -> dict[str, Any]:
         "version": BENCHMARK_VERSION,
         "workflow": config.workflow,
         "revision": _revision(),
+        "provenance": benchmark_provenance(config),
         "environment": {
             "platform": platform.platform(),
             "python": platform.python_version(),
@@ -361,6 +438,7 @@ def run_training_benchmark(config: TrainingBenchmarkConfig) -> dict[str, Any]:
 
 
 def write_benchmark_report(report: dict[str, Any], path: str | Path) -> None:
+    validate_benchmark_report(report)
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(json.dumps(report, indent=2) + "\n")
@@ -372,10 +450,16 @@ def compare_training_benchmarks(
     throughput_ratio: float = 0.9,
     latency_ratio: float = 1.1,
 ) -> dict[str, Any]:
+    if not all(
+        math.isfinite(value) and value > 0
+        for value in (throughput_ratio, latency_ratio)
+    ):
+        raise ValueError("Benchmark gate ratios must be finite and positive")
     for name, report, workflow in (
         ("V2", v2, "v2"),
         ("legacy", legacy, "legacy-rust"),
     ):
+        validate_benchmark_report(report)
         if report.get("format") != BENCHMARK_FORMAT:
             raise ValueError(f"{name} report has an unsupported format")
         if report.get("workflow") != workflow:
@@ -388,6 +472,8 @@ def compare_training_benchmarks(
         "inference_batch_size",
         "training_batch_size",
         "training_steps",
+        "device",
+        "precision",
     )
     mismatches = [
         field
@@ -436,7 +522,11 @@ def compare_training_benchmarks(
         "format": "c4a0-training-benchmark-comparison",
         "version": 1,
         "replacement_approved": approved,
-        "decision": "V2 may replace legacy Rust" if approved else "keep legacy Rust as baseline",
+        "release_approved": False,
+        "scope": "historical component comparison",
+        "decision": "V2 may replace legacy Rust"
+        if approved
+        else "keep legacy Rust as baseline",
         "gates": gates,
         "v2_revision": v2.get("revision"),
         "legacy_revision": legacy.get("revision"),
@@ -444,7 +534,9 @@ def compare_training_benchmarks(
 
 
 def load_benchmark_report(path: str | Path) -> dict[str, Any]:
-    return json.loads(Path(path).read_text())
+    report = json.loads(Path(path).read_text())
+    validate_benchmark_report(report)
+    return report
 
 
 def _standalone() -> None:

@@ -1,0 +1,223 @@
+{
+  "accepted": {
+    "format": "c4a0-async-training",
+    "version": 1,
+    "champion": 1,
+    "accepted_champions": 1,
+    "pending_candidate": null,
+    "replay_shards": 2,
+    "replay_games": 32,
+    "replay_samples": 495,
+    "next_game_id": 33,
+    "components": {
+      "actor": {
+        "state": "ready",
+        "champion_attempt": 1
+      },
+      "trainer": {
+        "state": "ready",
+        "champion_attempt": 1
+      },
+      "arena": {
+        "state": "accepted",
+        "attempt": 1,
+        "score": 0.625
+      }
+    }
+  },
+  "rejected": {
+    "format": "c4a0-async-training",
+    "version": 1,
+    "champion": 1,
+    "accepted_champions": 1,
+    "pending_candidate": null,
+    "replay_shards": 3,
+    "replay_games": 48,
+    "replay_samples": 756,
+    "next_game_id": 49,
+    "components": {
+      "actor": {
+        "state": "ready",
+        "champion_attempt": 1
+      },
+      "trainer": {
+        "state": "ready",
+        "champion_attempt": 1
+      },
+      "arena": {
+        "state": "rejected",
+        "attempt": 2,
+        "score": 0.5625
+      }
+    }
+  },
+  "soak_seconds": 301.27288012900044,
+  "resume": {
+    "format": "c4a0-async-training",
+    "version": 1,
+    "champion": 1,
+    "accepted_champions": 1,
+    "pending_candidate": null,
+    "replay_shards": 8,
+    "replay_games": 128,
+    "replay_samples": 2058,
+    "next_game_id": 289,
+    "components": {
+      "actor": {
+        "state": "ready",
+        "champion_attempt": 1
+      },
+      "trainer": {
+        "state": "ready",
+        "champion_attempt": 1
+      },
+      "arena": {
+        "state": "rejected",
+        "attempt": 9,
+        "score": 0.4375
+      }
+    }
+  },
+  "utilization": {
+    "soak": {
+      "samples": 601,
+      "process_cpu_cores_mean": 0.03916521227789663,
+      "process_cpu_cores_p50": 0.03998255657018323,
+      "process_cpu_cores_p95": 0.06009547139179377,
+      "process_cpu_cores_max": 0.09996688317097022,
+      "process_cpu_percent_mean": 0.24478257673685394,
+      "process_cpu_percent_p50": 0.24989097856364517,
+      "process_cpu_percent_p95": 0.37559669619871106,
+      "process_cpu_percent_max": 0.6247930198185638,
+      "system_cpu_percent_mean": 27.713488015040845,
+      "system_cpu_percent_p50": 19.444444444444443,
+      "system_cpu_percent_p95": 99.8766954377312,
+      "system_cpu_percent_max": 100.0,
+      "active_logical_cpus_mean": 10.8369384359401,
+      "active_logical_cpus_p50": 14.0,
+      "active_logical_cpus_p95": 16.0,
+      "active_logical_cpus_max": 16.0,
+      "process_rss_mib_mean": 4458.942615172629,
+      "process_rss_mib_p50": 4495.4921875,
+      "process_rss_mib_p95": 4573.078125,
+      "process_rss_mib_max": 4590.21484375,
+      "process_threads_mean": 139.846921797005,
+      "process_threads_p50": 140.0,
+      "process_threads_p95": 143.0,
+      "process_threads_max": 143.0,
+      "gpu_percent_mean": 10.394342762063228,
+      "gpu_percent_p50": 0.0,
+      "gpu_percent_p95": 36.0,
+      "gpu_percent_max": 81.0,
+      "gpu_memory_percent_mean": 7.665557404326123,
+      "gpu_memory_percent_p50": 0.0,
+      "gpu_memory_percent_p95": 26.0,
+      "gpu_memory_percent_max": 71.0,
+      "gpu_memory_mib_mean": 636.0099833610649,
+      "gpu_memory_mib_p50": 630.0,
+      "gpu_memory_mib_p95": 705.0,
+      "gpu_memory_mib_max": 780.0,
+      "gpu_power_watts_mean": 9.940049916805325,
+      "gpu_power_watts_p50": 9.56,
+      "gpu_power_watts_p95": 12.93,
+      "gpu_power_watts_max": 20.04,
+      "gpu_sm_clock_mhz_mean": 1555.198003327787,
+      "gpu_sm_clock_mhz_p50": 1545.0,
+      "gpu_sm_clock_mhz_p95": 1702.0,
+      "gpu_sm_clock_mhz_max": 1725.0,
+      "gpu_temperature_c_mean": 47.6522462562396,
+      "gpu_temperature_c_p50": 48.0,
+      "gpu_temperature_c_p95": 52.0,
+      "gpu_temperature_c_max": 53.0,
+      "per_core_percent_mean": [
+        23.228218028708724,
+        25.446412380146377,
+        24.751925257750074,
+        25.270150118155545,
+        31.463210241163203,
+        46.18905810742781,
+        34.03285518139055,
+        43.16085835822847,
+        25.713462874386188,
+        23.28216719940248,
+        25.931420619852545,
+        23.141730445405123,
+        24.13526356402026,
+        22.867079623350683,
+        22.334054574088693,
+        22.137174750167354
+      ],
+      "sampled_seconds": 300.7504009580007,
+      "estimated_gpu_energy_joules": 2989.473998021743
+    }
+  },
+  "format": "c4a0-training-qualification",
+  "version": 1,
+  "device": "cuda",
+  "torch": "2.13.0+cu130",
+  "oom_injected": true,
+  "forced_lifecycle_decisions": [
+    "accepted",
+    "rejected"
+  ],
+  "config": {
+    "base_dir": "/tmp/c4a0-training-qualification-paqliu58",
+    "device": "cuda",
+    "run_seed": 1337,
+    "n_mcts_iterations": 16,
+    "c_exploration": 6.6,
+    "c_ply_penalty": 0.01,
+    "mcts_value_scale": 0.0,
+    "value_loss_weight": 0.0,
+    "self_play_shard_games": 16,
+    "self_play_batch_games": 16,
+    "replay_capacity_games": 128,
+    "replay_warmup_games": 16,
+    "replay_ratio": 4.0,
+    "validation_fraction": 0.05,
+    "archive_depth": 8,
+    "champion_self_play_weight": 0.65,
+    "archive_weight": 0.3,
+    "uniform_weight": 0.025,
+    "random_weight": 0.025,
+    "archive_recency": 0.7,
+    "arena_min_games": 8,
+    "arena_max_games": 16,
+    "arena_p0": 0.5,
+    "arena_p1": 0.55,
+    "arena_alpha": 0.05,
+    "arena_beta": 0.05,
+    "arena_pair_batch_size": 4,
+    "root_dirichlet_epsilon": 0.25,
+    "root_dirichlet_alpha": 0.3,
+    "temperature_cutoff_ply": 8,
+    "early_temperature": 1.0,
+    "late_temperature": 0.0,
+    "training_batch_size": 32,
+    "inference_batch_size": 32,
+    "data_loader_workers": 2,
+    "mcts_worker_threads": 2,
+    "precision": "16-mixed",
+    "inference_amp_min_batch_size": 96,
+    "n_residual_blocks": 1,
+    "conv_filter_size": 32,
+    "n_policy_layers": 4,
+    "n_value_layers": 2,
+    "lr_schedule": [
+      0.0,
+      0.002,
+      10.0,
+      0.0008
+    ],
+    "l2_reg": 0.0004,
+    "max_gens": null,
+    "max_candidate_attempts": 1,
+    "validation_interval_steps": 5,
+    "validation_batches": 2,
+    "rejected_weight_retention": 3,
+    "learner_incumbent_min_score": 0.5,
+    "debt_pause_shards": 2,
+    "debt_resume_shards": 1
+  },
+  "release_approved": false
+}

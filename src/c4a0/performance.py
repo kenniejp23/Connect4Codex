@@ -61,6 +61,28 @@ def _process_status(pid: int) -> tuple[int, int]:
     return rss_kib, threads
 
 
+def _process_tree_status(pid: int) -> tuple[int, int]:
+    pending, seen = [pid], set()
+    rss = threads = 0
+    while pending:
+        current = pending.pop()
+        if current in seen:
+            continue
+        seen.add(current)
+        try:
+            memory, count = _process_status(current)
+            rss += memory
+            threads += count
+            for children in Path(f"/proc/{current}/task").glob("*/children"):
+                try:
+                    pending.extend(int(item) for item in children.read_text().split())
+                except FileNotFoundError:
+                    pass
+        except FileNotFoundError:
+            pass
+    return rss, threads
+
+
 def _percentile(values: list[float], fraction: float) -> float | None:
     if not values:
         return None
@@ -72,7 +94,8 @@ def _percentile(values: list[float], fraction: float) -> float | None:
 class UtilizationMonitor:
     """Sample process/system CPU and NVIDIA activity, split by named phase."""
 
-    def __init__(self, interval_seconds: float = 0.5):
+    def __init__(self, interval_seconds: float = 0.5, include_children: bool = False):
+        self.include_children = include_children
         if interval_seconds <= 0:
             raise ValueError("monitor interval must be positive")
         self.interval_seconds = interval_seconds
@@ -177,16 +200,18 @@ class UtilizationMonitor:
                     if core_total <= 0
                     else 100.0 * (core_total - core_idle) / core_total
                 )
-            rss_kib, threads = _process_status(self.pid)
+            rss_kib, threads = (
+                _process_tree_status(self.pid)
+                if self.include_children
+                else _process_status(self.pid)
+            )
             with self._phase_lock:
                 phase = self._phase
             self.samples[phase].append(
                 {
                     "elapsed_seconds": elapsed,
                     "process_cpu_cores": process_cores,
-                    "process_cpu_percent": 100.0
-                    * process_cores
-                    / self.logical_cpus,
+                    "process_cpu_percent": 100.0 * process_cores / self.logical_cpus,
                     "system_cpu_percent": system_cpu,
                     "active_logical_cpus": sum(value >= 10.0 for value in per_core),
                     "per_core_percent": per_core,
@@ -211,6 +236,7 @@ class UtilizationMonitor:
                 self._gpu_process.wait(timeout=1)
             except subprocess.TimeoutExpired:
                 self._gpu_process.kill()
+                self._gpu_process.wait(timeout=1)
         self._gpu_process = None
 
     def summary(self) -> dict[str, Any]:
@@ -239,9 +265,7 @@ class UtilizationMonitor:
         )
         for field in fields:
             values = [
-                float(sample[field])
-                for sample in samples
-                if sample[field] is not None
+                float(sample[field]) for sample in samples if sample[field] is not None
             ]
             if not values:
                 continue
@@ -268,4 +292,3 @@ class UtilizationMonitor:
         if powers:
             result["estimated_gpu_energy_joules"] = statistics.fmean(powers) * elapsed
         return result
-

@@ -26,10 +26,14 @@ if [[ -z "$wheel_path" ]]; then
   echo "wheel build did not produce a wheel" >&2
   exit 1
 fi
-UV_LINK_MODE=hardlink uv pip install --python "$venv_dir/bin/python" "$wheel_path"
+constraint_args=()
+if [[ "${1:-resolver}" == "locked" ]]; then
+  constraint_args=(--constraint "$(pwd)/constraints/linux-py311.txt")
+fi
+UV_LINK_MODE=hardlink uv pip install --python "$venv_dir/bin/python" "${constraint_args[@]}" "$wheel_path"
 (
 cd "$venv_dir"
-env -u PYTHONPATH "$venv_dir/bin/python" - <<'PY'
+env -u PYTHONPATH QT_QPA_PLATFORM=offscreen "$venv_dir/bin/python" - <<'PY'
 import importlib.util
 from importlib.resources import files
 
@@ -57,6 +61,26 @@ games = c4a0_cpp.play_games(
 )
 assert len(games.results) == 1
 assert games.results[0].samples[-1].to_numpy()[0].shape == (2, 6, 7)
+from PySide6.QtGui import QGuiApplication
+from PySide6.QtQml import QQmlApplicationEngine
+from PySide6.QtCore import QUrl
+from c4a0.gui.app import AppController, GameController
+from c4a0.gui.jobs import JobManager
+application = QGuiApplication([])
+controller = AppController()
+game = GameController(controller)
+jobs = JobManager()
+engine = QQmlApplicationEngine()
+engine.rootContext().setContextProperty("App", controller)
+engine.rootContext().setContextProperty("Game", game)
+engine.rootContext().setContextProperty("Jobs", jobs)
+engine.load(QUrl.fromLocalFile(str(files("c4a0.gui").joinpath("qml", "Main.qml"))))
+assert engine.rootObjects()
+application.processEvents()
+game.shutdown()
+import shiboken6
+shiboken6.delete(engine)
+application.processEvents()
 print(c4a0.__file__)
 print(c4a0_cpp.__file__)
 PY

@@ -10,6 +10,8 @@ import pytorch_lightning as pl
 from torch.optim.adam import Adam
 from einops import rearrange
 
+from c4a0.losses import policy_value_losses
+
 from c4a0_cpp import N_COLS, N_ROWS  # type: ignore
 
 
@@ -61,6 +63,9 @@ class ConnectFourNet(pl.LightningModule):
         self.config = config.model_copy(deep=True)
         self.lr_schedule = config.lr_schedule
         self.l2_reg = config.l2_reg
+        self.mcts_value_scale = 1.0
+        self.schedule_generation = 0
+        self.value_loss_weight = 1.0
 
         self.conv = nn.Sequential(
             nn.Conv2d(2, config.conv_filter_size, kernel_size=3, padding=1),
@@ -117,18 +122,48 @@ class ConnectFourNet(pl.LightningModule):
         q_no_penalty = q_no_penalty.squeeze(1)  # b
         return policy_logprobs, q_penalty, q_no_penalty
 
-    def forward_numpy(self, x: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """
-        Forward pass with input/output as numpy. Model is run in inference mode. Used for self play.
-        """
+    def infer_numpy(
+        self,
+        x: np.ndarray,
+        *,
+        value_scale: float | None = None,
+        precision: str = "32-true",
+        amp_min_batch_size: int = 96,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Shared search inference, including the checkpoint's value-head policy."""
         self.eval()
+        scale = (
+            getattr(self, "mcts_value_scale", 1.0)
+            if value_scale is None
+            else value_scale
+        )
         pos = torch.from_numpy(x).to(self.device)
-        with torch.inference_mode():
-            policy, q_penalty, q_no_penalty = self.forward(pos)
-        policy = np.ascontiguousarray(policy.cpu().numpy())
-        q_penalty = np.ascontiguousarray(q_penalty.cpu().numpy())
-        q_no_penalty = np.ascontiguousarray(q_no_penalty.cpu().numpy())
-        return policy, q_penalty, q_no_penalty
+        use_amp = (
+            self.device.type == "cuda"
+            and precision != "32-true"
+            and (precision == "16-mixed" or len(x) >= amp_min_batch_size)
+        )
+        with (
+            torch.inference_mode(),
+            torch.autocast(
+                device_type=self.device.type, dtype=torch.float16, enabled=use_amp
+            ),
+        ):
+            if scale == 0:
+                features = self.conv(pos).flatten(1)
+                policy = self.fc_policy(features)
+                penalty = value = torch.zeros(len(x), device=self.device)
+            else:
+                policy, penalty, value = self.forward(pos)
+                penalty, value = penalty * scale, value * scale
+        return (
+            np.ascontiguousarray(policy.float().cpu().numpy()),
+            np.ascontiguousarray(penalty.float().cpu().numpy()),
+            np.ascontiguousarray(value.float().cpu().numpy()),
+        )
+
+    def forward_numpy(self, x: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        return self.infer_numpy(x)
 
     def _calculate_conv_output_size(self):
         """Helper function to calculate the output size of the convolutional block."""
@@ -139,8 +174,7 @@ class ConnectFourNet(pl.LightningModule):
         return int(torch.numel(dummy_output))
 
     def configure_optimizers(self):
-        gen_n: int = self.trainer.gen_n  # type: ignore
-        assert gen_n is not None, "please pass gen_n to trainer"
+        gen_n = getattr(self, "schedule_generation", 0)
         schedule = sorted(list(self.lr_schedule.items()))
         _, lr = schedule.pop(0)
         for gen_threshold, gen_rate in schedule:
@@ -159,34 +193,9 @@ class ConnectFourNet(pl.LightningModule):
         return self.step(batch, log_prefix="val")
 
     def step(self, batch, log_prefix):
-        # Forward pass
-        pos, policy_target, q_penalty_target, q_no_penalty_target = batch[:4]
-        policy_weight = (
-            batch[4]
-            if len(batch) > 4
-            else torch.ones_like(q_penalty_target, dtype=torch.float32)
+        policy_loss, q_penalty_loss, q_no_penalty_loss = policy_value_losses(
+            self.forward(batch[0]), batch, getattr(self, "value_loss_weight", 1.0)
         )
-        value_weight = (
-            batch[5]
-            if len(batch) > 5
-            else torch.ones_like(q_penalty_target, dtype=torch.float32)
-        )
-        policy_logprob, q_penalty_pred, q_no_penalty_pred = self.forward(pos)
-        policy_logprob_targets = torch.log(policy_target + self.EPS)
-
-        # Losses
-        policy_per_sample = (
-            policy_target * (policy_logprob_targets - policy_logprob)
-        ).sum(dim=1)
-        policy_loss = (
-            policy_per_sample * policy_weight
-        ).sum() / policy_weight.sum().clamp_min(1.0)
-        q_penalty_loss = (
-            ((q_penalty_pred - q_penalty_target) ** 2) * value_weight
-        ).sum() / value_weight.sum().clamp_min(1.0)
-        q_no_penalty_loss = (
-            ((q_no_penalty_pred - q_no_penalty_target) ** 2) * value_weight
-        ).sum() / value_weight.sum().clamp_min(1.0)
         loss = policy_loss + q_penalty_loss + q_no_penalty_loss
 
         value_loss = q_penalty_loss + q_no_penalty_loss

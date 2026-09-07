@@ -1,0 +1,59 @@
+name: Build Linux release candidate
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag to qualify and package
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  artifacts:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: jdx/mise-action@v3
+        with:
+          version: 2026.1.6
+          install: true
+      - name: Install Qt runtime dependencies
+        run: sudo apt-get update && sudo apt-get install -y libegl1 libopengl0 libxkbcommon-x11-0 libxcb-cursor0
+      - name: Verify version tag
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: mise exec -- python -c 'import os,tomllib; assert os.environ["RELEASE_TAG"] == "v" + tomllib.load(open("pyproject.toml","rb"))["project"]["version"]'
+      - name: Locked qualification
+        run: mise run ci && mise exec -- bash scripts/check-wheel.sh locked
+        env:
+          QT_QPA_PLATFORM: offscreen
+      - name: Build distributable artifacts
+        run: |
+          mise exec -- uv build --out-dir dist
+          cp constraints/linux-py311.txt scripts/install-linux.sh docs/linux-release.md docs/release-readiness.md dist/
+          cd dist
+          sha256sum *.whl *.tar.gz *.txt *.sh *.md > SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-x86-64-python311-release-candidate
+          path: dist/
+  draft-release:
+    needs: artifacts
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-x86-64-python311-release-candidate
+          path: dist
+      - name: Create reviewable GitHub release draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: gh release create "$RELEASE_TAG" dist/* --verify-tag --draft --title "$RELEASE_TAG Linux release candidate" --notes-file docs/linux-release.md

@@ -6,6 +6,8 @@ __pycache__/
 .venv/
 .mise/
 build/
+dist/
+/qualification/
 work/
 CMakeUserPresets.json
 mise.local.toml

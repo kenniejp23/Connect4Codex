@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from datetime import datetime
 import json
+import os
+import selectors
 from pathlib import Path
 import signal
 import subprocess
@@ -118,7 +120,13 @@ def run_training(data: dict[str, Any]) -> dict[str, Any]:
 
 def run_score(data: dict[str, Any]) -> dict[str, Any]:
     config = SolverScoreConfig.model_validate(data)
+    if is_v2_run(config.base_dir):
+        raise ValueError(
+            "Saved-policy scoring requires a legacy run; V2 runs contain replay and candidate checkpoints"
+        )
     generations = TrainingGen.load_all(config.base_dir)
+    if not generations:
+        raise ValueError("No legacy generations are available for scoring")
     selected = [
         generation
         for generation in generations
@@ -386,16 +394,32 @@ def run_validation(data: dict[str, Any]) -> dict[str, Any]:
         bufsize=1,
     )
     assert process.stdout is not None
-    while process.poll() is None:
-        line = process.stdout.readline()
-        if line:
-            emit("log", level="INFO", message=line.rstrip())
-        if _cancelled.is_set():
+    try:
+        with selectors.DefaultSelector() as selector:
+            selector.register(process.stdout, selectors.EVENT_READ)
+            while selector.get_map():
+                if _cancelled.is_set():
+                    raise TrainingCancelled("validation cancelled")
+                for key, _ in selector.select(timeout=0.1):
+                    chunk = os.read(key.fd, 65536)
+                    if chunk:
+                        emit(
+                            "log",
+                            level="INFO",
+                            message=chunk.decode(errors="replace").rstrip(),
+                        )
+                    else:
+                        selector.unregister(key.fileobj)
+            process.wait(timeout=1)
+    finally:
+        if process.poll() is None:
             process.terminate()
-            process.wait(timeout=5)
-            raise TrainingCancelled("validation cancelled")
-    for line in process.stdout:
-        emit("log", level="INFO", message=line.rstrip())
+            try:
+                process.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=1)
+        process.stdout.close()
     if process.returncode != 0:
         raise RuntimeError(f"validation exited with status {process.returncode}")
     return {"profile": config.profile, "exit_code": process.returncode}
@@ -412,10 +436,24 @@ RUNNERS = {
 
 
 def main() -> int:
+    os.setsid()
     signal.signal(signal.SIGTERM, _handle_signal)
     signal.signal(signal.SIGINT, _handle_signal)
     logger.remove()
     logger.add(_log_sink, colorize=False)
+    log_dir = (
+        Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local/state")))
+        / "c4a0/logs"
+    )
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / f"worker-{os.getpid()}.log"
+    logger.add(log_path, rotation="5 MB", retention=3, enqueue=False)
+    for obsolete in sorted(
+        log_dir.glob("worker-*.log*"),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )[60:]:
+        obsolete.unlink(missing_ok=True)
     try:
         request_line = sys.stdin.readline()
         if not request_line:
@@ -427,7 +465,12 @@ def main() -> int:
         runner = RUNNERS.get(kind)
         if runner is None:
             raise ValueError(f"unsupported job type: {kind}")
-        emit("started", kind=kind)
+        emit(
+            "started",
+            kind=kind,
+            process_group=os.getpgrp(),
+            diagnostic_log=str(log_path),
+        )
         threading.Thread(target=_listen_for_commands, daemon=True).start()
         result = runner(request.get("config", {}))
         if _cancelled.is_set():

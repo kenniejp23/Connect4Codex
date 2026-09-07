@@ -290,6 +290,42 @@ def train(
     logger.info("Training stopped: {}", result)
 
 
+@app.command("benchmark-production")
+def benchmark_production_command(
+    config_path: str, output: str, repeats: int = 3, timeout_seconds: float = 3600
+):
+    """Benchmark asynchronous training and independently evaluate saved candidates."""
+    from pathlib import Path
+    from c4a0.production_benchmark import run_production_benchmark
+
+    config = TrainingV2Config.model_validate_json(Path(config_path).read_text())
+    report = run_production_benchmark(config, repeats, timeout_seconds)
+    Path(output).write_text(json.dumps(report, indent=2, allow_nan=False) + "\n")
+    typer.echo(output)
+
+
+@app.command("export-model")
+def export_model_command(
+    output: str, base_dir: str = "training-v2", attempt: Optional[int] = None
+):
+    """Export compact inference weights and settings from a trusted local run."""
+    from c4a0.training_v2 import export_inference_model
+
+    typer.echo(str(export_inference_model(base_dir, output, attempt)))
+
+
+@app.command("training-config")
+def training_config_command(base_dir: str = "training-v2", device: str = "cpu"):
+    """Print the effective persisted experiment settings before resuming."""
+    from c4a0.training_v2 import effective_training_config
+
+    typer.echo(
+        effective_training_config(
+            TrainingV2Config(base_dir=base_dir, device=device)
+        ).model_dump_json(indent=2)
+    )
+
+
 @app.command("training-status")
 def training_status_command(base_dir: str = "training-v2"):
     """Show champion, pending candidate, and replay state for a V2 run."""
@@ -303,7 +339,9 @@ def minimax_test(
     device: str = str(get_torch_device()),
     games_per_level: int = 20,
     pair_batch_size: int = 6,
-    max_depth: int = 42,
+    max_depth: int = 6,
+    mcts_value_scale: Optional[float] = None,
+    trusted_checkpoint: bool = False,
     mcts_iterations: int = 64,
     inference_batch_size: int = 128,
     c_exploration: float = 1.4,
@@ -313,7 +351,9 @@ def minimax_test(
 ):
     """Test a model against random and successively deeper minimax opponents."""
     model = (
-        load_model_checkpoint(model_path)
+        load_model_checkpoint(
+            model_path, mcts_value_scale=mcts_value_scale, trusted=trusted_checkpoint
+        )
         if model_path is not None
         else load_champion_model(base_dir)
     )

@@ -5,6 +5,10 @@ from __future__ import annotations
 from collections import OrderedDict
 from concurrent.futures import Future, ThreadPoolExecutor
 import copy
+import ctypes
+import signal
+import fcntl
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 import hashlib
@@ -27,6 +31,7 @@ from torch.optim import Adam
 from torch.utils.tensorboard import SummaryWriter
 
 import c4a0_cpp  # type: ignore
+from c4a0.arena_statistics import PairedSprtGate
 from c4a0.config import TrainingV2Config
 from c4a0.nn import ConnectFourNet, ModelConfig
 from c4a0.training_common import TrainingCancelled, parse_lr_schedule
@@ -66,6 +71,29 @@ def _baseline_kind_and_game(model_id: int) -> tuple[int, int] | None:
     return RANDOM_MODEL_ID, (delta - 1) // 2
 
 
+def _sync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+@contextmanager
+def training_run_owner(base_dir: Path):
+    """Own the complete coordinator lifecycle; readers never take this lock."""
+    base_dir.mkdir(parents=True, exist_ok=True)
+    with (base_dir / ".trainer.lock").open("a+b") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise RuntimeError(f"Another trainer owns this run: {base_dir}") from error
+        try:
+            yield
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+
 def _atomic_bytes(path: Path, data: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(
@@ -77,6 +105,7 @@ def _atomic_bytes(path: Path, data: bytes) -> None:
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, path)
+        _sync_directory(path.parent)
     except BaseException:
         try:
             os.unlink(temporary)
@@ -96,12 +125,25 @@ def _atomic_torch_save(path: Path, payload: dict[str, Any]) -> None:
         with open(temporary, "rb") as stream:
             os.fsync(stream.fileno())
         os.replace(temporary, path)
+        _sync_directory(path.parent)
     except BaseException:
         try:
             os.unlink(temporary)
         except FileNotFoundError:
             pass
         raise
+
+
+def _owned_cpu_tree(value):
+    if isinstance(value, torch.Tensor):
+        return value.detach().cpu().clone()
+    if isinstance(value, dict):
+        return {key: _owned_cpu_tree(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_owned_cpu_tree(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_owned_cpu_tree(item) for item in value)
+    return copy.deepcopy(value)
 
 
 def _checkpoint_payload(
@@ -115,11 +157,14 @@ def _checkpoint_payload(
         "format": CHECKPOINT_FORMAT,
         "version": CHECKPOINT_VERSION,
         "model_config": model.config.model_dump(mode="json"),
+        "inference": {"version": 1, "mcts_value_scale": model.mcts_value_scale},
+        "value_loss_weight": model.value_loss_weight,
         "state_dict": {
-            key: value.detach().cpu() for key, value in model.state_dict().items()
+            key: value.detach().cpu().clone()
+            for key, value in model.state_dict().items()
         },
         "optimizer_state": (
-            copy.deepcopy(optimizer.state_dict()) if optimizer is not None else None
+            _owned_cpu_tree(optimizer.state_dict()) if optimizer is not None else None
         ),
         "scaler_state": copy.deepcopy(scaler.state_dict())
         if scaler is not None
@@ -134,8 +179,10 @@ def _checkpoint_payload(
     }
 
 
-def _load_checkpoint(path: str | Path) -> tuple[ConnectFourNet, dict[str, Any]]:
-    payload = torch.load(path, map_location="cpu", weights_only=False)
+def _load_checkpoint(
+    path: str | Path, *, trusted: bool = True
+) -> tuple[ConnectFourNet, dict[str, Any]]:
+    payload = torch.load(path, map_location="cpu", weights_only=not trusted)
     if (
         payload.get("format") != CHECKPOINT_FORMAT
         or payload.get("version") != CHECKPOINT_VERSION
@@ -147,19 +194,89 @@ def _load_checkpoint(path: str | Path) -> tuple[ConnectFourNet, dict[str, Any]]:
     if state_dict is None:
         raise ValueError(f"neural checkpoint has no state_dict: {path}")
     model.load_state_dict(state_dict)
+    inference = payload.get("inference")
+    if inference is None:
+        # Version-one checkpoints predate inference metadata. Recover it from
+        # their enclosing run, including runs moved to a different directory.
+        for parent in Path(path).resolve().parents:
+            database = parent / "run.sqlite3"
+            if database.is_file():
+                with sqlite3.connect(
+                    f"{database.as_uri()}?mode=ro", uri=True
+                ) as connection:
+                    row = connection.execute(
+                        "SELECT value FROM run_state WHERE key='config'"
+                    ).fetchone()
+                connection.close()
+                if row:
+                    saved_config = json.loads(row[0])
+                    inference = {
+                        "version": 1,
+                        "mcts_value_scale": saved_config["mcts_value_scale"],
+                    }
+                    model.value_loss_weight = saved_config["value_loss_weight"]
+                break
+    if inference is not None:
+        if inference.get("version") != 1 or not math.isfinite(
+            float(inference["mcts_value_scale"])
+        ):
+            raise ValueError("unsupported checkpoint inference settings")
+        model.mcts_value_scale = float(inference["mcts_value_scale"])
+        payload["inference"] = inference
+    model.value_loss_weight = float(
+        payload.get("value_loss_weight", model.value_loss_weight)
+    )
     return model, payload
 
 
 def load_champion_model(base_dir: str) -> ConnectFourNet:
-    manifest = RunManifest.open_existing(Path(base_dir))
-    model, _ = _load_checkpoint(manifest.champion()["checkpoint_path"])
-    return model
+    with RunManifest.open_existing(Path(base_dir)) as manifest:
+        model, _ = _load_checkpoint(manifest.champion()["checkpoint_path"])
+        return model
 
 
-def load_model_checkpoint(checkpoint_path: str | Path) -> ConnectFourNet:
+def load_model_checkpoint(
+    checkpoint_path: str | Path,
+    *,
+    mcts_value_scale: float | None = None,
+    trusted: bool = False,
+) -> ConnectFourNet:
     """Load a standalone V2 model checkpoint for evaluation tools."""
-    model, _ = _load_checkpoint(checkpoint_path)
+    model, payload = _load_checkpoint(checkpoint_path, trusted=trusted)
+    if mcts_value_scale is not None:
+        if not math.isfinite(mcts_value_scale):
+            raise ValueError("mcts_value_scale must be finite")
+        model.mcts_value_scale = mcts_value_scale
+    elif "inference" not in payload:
+        raise ValueError(
+            "Checkpoint inference settings unavailable; provide mcts_value_scale explicitly"
+        )
     return model
+
+
+def export_inference_model(
+    base_dir: str, output: str | Path, attempt_n: int | None = None
+) -> Path:
+    """Export trusted run weights to a compact artifact loadable with weights_only=True."""
+    model = (
+        load_champion_model(base_dir)
+        if attempt_n is None
+        else load_attempt_model(base_dir, attempt_n)
+    )
+    payload = {
+        "format": CHECKPOINT_FORMAT,
+        "version": CHECKPOINT_VERSION,
+        "artifact": "inference",
+        "inference_version": 1,
+        "model_config": model.config.model_dump(mode="json"),
+        "state_dict": _owned_cpu_tree(model.state_dict()),
+        "inference": {"version": 1, "mcts_value_scale": model.mcts_value_scale},
+    }
+    output = Path(output)
+    if output.exists():
+        raise FileExistsError(f"Inference export already exists: {output}")
+    _atomic_torch_save(output, payload)
+    return output
 
 
 def is_v2_run(base_dir: str) -> bool:
@@ -167,45 +284,104 @@ def is_v2_run(base_dir: str) -> bool:
 
 
 def load_attempt_model(base_dir: str, attempt_n: int) -> ConnectFourNet:
-    manifest = RunManifest.open_existing(Path(base_dir))
-    row = manifest.connection.execute(
-        "SELECT checkpoint_path FROM attempts WHERE attempt_n = ?", (attempt_n,)
-    ).fetchone()
-    if row is None or not Path(row["checkpoint_path"]).is_file():
-        raise FileNotFoundError(
-            f"V2 attempt {attempt_n} does not have retained weights"
-        )
-    model, _ = _load_checkpoint(row["checkpoint_path"])
-    return model
+    with RunManifest.open_existing(Path(base_dir)) as manifest:
+        row = manifest.connection.execute(
+            "SELECT checkpoint_path FROM attempts WHERE attempt_n = ?", (attempt_n,)
+        ).fetchone()
+        if (
+            row is None
+            or not manifest.resolve_artifact(row["checkpoint_path"]).is_file()
+        ):
+            raise FileNotFoundError(
+                f"V2 attempt {attempt_n} does not have retained weights"
+            )
+        model, _ = _load_checkpoint(manifest.resolve_artifact(row["checkpoint_path"]))
+        return model
 
 
 def list_attempts(base_dir: str) -> list[dict[str, Any]]:
-    manifest = RunManifest.open_existing(Path(base_dir))
-    champion = int(manifest.champion()["attempt_n"])
-    rows = manifest.connection.execute(
-        "SELECT * FROM attempts ORDER BY attempt_n DESC"
-    ).fetchall()
-    return [
-        {
-            **dict(row),
-            "is_champion": int(row["attempt_n"]) == champion,
-        }
-        for row in rows
-    ]
+    with RunManifest.open_existing(Path(base_dir)) as manifest:
+        champion = int(manifest.champion()["attempt_n"])
+        rows = manifest.connection.execute(
+            "SELECT * FROM attempts ORDER BY attempt_n DESC"
+        ).fetchall()
+        return [
+            {
+                **manifest.artifact_row(row),
+                "is_champion": int(row["attempt_n"]) == champion,
+            }
+            for row in rows
+        ]
 
 
 class RunManifest:
     """Single-writer manifest for an asynchronous training run."""
 
     def __init__(self, base_dir: Path, connection: sqlite3.Connection):
-        self.base_dir = base_dir
+        self.base_dir = base_dir.resolve()
         self.connection = connection
         self.connection.row_factory = sqlite3.Row
+
+    def close(self) -> None:
+        self.connection.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.close()
+
+    def relative_artifact(self, path: str | Path) -> str:
+        path = Path(path)
+        if ".." in path.parts:
+            raise ValueError(f"Artifact contains parent traversal: {path}")
+        try:
+            return path.resolve().relative_to(self.base_dir).as_posix()
+        except ValueError:
+            # Existing manifests may contain paths rooted at a former run location.
+            for component in ("attempts", "replay"):
+                if component in path.parts:
+                    index = len(path.parts) - 1 - path.parts[::-1].index(component)
+                    return Path(*path.parts[index:]).as_posix()
+            if not path.is_absolute():
+                return path.as_posix()
+            raise ValueError(f"Artifact is outside the run: {path}")
+
+    def resolve_artifact(self, path: str | Path) -> Path:
+        return self.base_dir / self.relative_artifact(path)
+
+    def artifact_row(self, row) -> dict[str, Any]:
+        result = dict(row)
+        for key in ("checkpoint_path", "path"):
+            if key in result:
+                result[key] = str(self.resolve_artifact(result[key]))
+        return result
+
+    def _migrate_artifacts(self) -> None:
+        with self.connection:
+            for table, column, key in (
+                ("attempts", "checkpoint_path", "attempt_n"),
+                ("replay_shards", "path", "shard_id"),
+            ):
+                for row in self.connection.execute(
+                    f"SELECT {key}, {column} FROM {table}"
+                ).fetchall():
+                    self.connection.execute(
+                        f"UPDATE {table} SET {column} = ? WHERE {key} = ?",
+                        (self.relative_artifact(row[column]), row[key]),
+                    )
+            self.connection.execute(
+                "INSERT OR REPLACE INTO run_state VALUES('artifact_paths_version', '2')"
+            )
 
     @classmethod
     def create(cls, base_dir: Path, config: TrainingV2Config) -> "RunManifest":
         database_path = base_dir / "run.sqlite3"
-        if base_dir.exists() and any(base_dir.iterdir()) and not database_path.exists():
+        if (
+            base_dir.exists()
+            and any(item.name != ".trainer.lock" for item in base_dir.iterdir())
+            and not database_path.exists()
+        ):
             raise FileExistsError(
                 f"V2 training requires an empty or V2 directory: {base_dir}"
             )
@@ -216,16 +392,26 @@ class RunManifest:
         manifest = cls(base_dir, connection)
         manifest._create_schema()
         if manifest.get_state("format") is None:
-            manifest.set_state("format", RUN_FORMAT)
-            manifest.set_state("version", RUN_VERSION)
-            manifest.set_state("config", config.model_dump(mode="json"))
-            manifest.set_state("next_game_id", 1)
-            manifest.set_state("accepted_count", 0)
+            with connection:
+                connection.executemany(
+                    "INSERT INTO run_state(key, value) VALUES(?, ?)",
+                    [
+                        (key, json.dumps(value))
+                        for key, value in {
+                            "format": RUN_FORMAT,
+                            "version": RUN_VERSION,
+                            "config": config.model_dump(mode="json"),
+                            "next_game_id": 1,
+                            "accepted_count": 0,
+                        }.items()
+                    ],
+                )
         elif (
             manifest.get_state("format") != RUN_FORMAT
             or manifest.get_state("version") != RUN_VERSION
         ):
             raise ValueError("unsupported asynchronous training run format")
+        manifest._migrate_artifacts()
         return manifest
 
     @classmethod
@@ -233,13 +419,15 @@ class RunManifest:
         database_path = base_dir / "run.sqlite3"
         if not database_path.is_file():
             raise FileNotFoundError(f"no V2 training run found in {base_dir}")
-        connection = sqlite3.connect(database_path)
-        connection.execute("PRAGMA journal_mode=WAL")
+        connection = sqlite3.connect(
+            f"{database_path.resolve().as_uri()}?mode=ro", uri=True
+        )
         manifest = cls(base_dir, connection)
         if (
             manifest.get_state("format") != RUN_FORMAT
             or manifest.get_state("version") != RUN_VERSION
         ):
+            connection.close()
             raise ValueError("unsupported asynchronous training run format")
         return manifest
 
@@ -301,7 +489,7 @@ class RunManifest:
         self.connection.execute(
             "INSERT INTO attempts(attempt_n, status, parent_attempt, checkpoint_path, "
             "created_at) VALUES(0, 'accepted', NULL, ?, ?)",
-            (str(checkpoint_path), datetime.now().isoformat()),
+            (self.relative_artifact(checkpoint_path), datetime.now().isoformat()),
         )
         self.set_state("champion_attempt", 0)
         self.connection.commit()
@@ -329,7 +517,7 @@ class RunManifest:
             (
                 attempt_n,
                 parent_attempt,
-                str(checkpoint_path),
+                self.relative_artifact(checkpoint_path),
                 datetime.now().isoformat(),
                 val_loss,
                 training_steps,
@@ -348,7 +536,7 @@ class RunManifest:
             (
                 attempt_n,
                 parent_attempt,
-                str(checkpoint_path),
+                self.relative_artifact(checkpoint_path),
                 datetime.now().isoformat(),
             ),
         )
@@ -358,7 +546,7 @@ class RunManifest:
         row = self.connection.execute(
             "SELECT * FROM attempts WHERE status = 'pending' ORDER BY attempt_n LIMIT 1"
         ).fetchone()
-        return None if row is None else dict(row)
+        return None if row is None else self.artifact_row(row)
 
     def champion(self) -> dict[str, Any]:
         attempt = self.get_state("champion_attempt")
@@ -369,7 +557,7 @@ class RunManifest:
         ).fetchone()
         if row is None:
             raise RuntimeError("champion pointer references a missing attempt")
-        return dict(row)
+        return self.artifact_row(row)
 
     def accepted_models(self, limit: int) -> list[dict[str, Any]]:
         champion = int(self.champion()["attempt_n"])
@@ -378,7 +566,7 @@ class RunManifest:
             "ORDER BY attempt_n DESC LIMIT ?",
             (champion, limit),
         ).fetchall()
-        return [dict(row) for row in rows]
+        return [self.artifact_row(row) for row in rows]
 
     def decide_attempt(self, attempt_n: int, result: dict[str, Any]) -> bool:
         accepted = result["decision"] == "accepted"
@@ -412,7 +600,7 @@ class RunManifest:
                 "INSERT INTO replay_shards(path, games, samples, train_samples, "
                 "champion_attempt, first_game_id, created_at) VALUES(?, ?, ?, ?, ?, ?, ?)",
                 (
-                    event["path"],
+                    self.relative_artifact(event["path"]),
                     event["games"],
                     event["samples"],
                     event["train_samples"],
@@ -451,7 +639,7 @@ class RunManifest:
         rows = self.connection.execute(
             "SELECT * FROM replay_shards WHERE active = 1 ORDER BY shard_id"
         ).fetchall()
-        return [dict(row) for row in rows]
+        return [self.artifact_row(row) for row in rows]
 
     def status(self) -> dict[str, Any]:
         champion = self.champion()
@@ -475,8 +663,22 @@ class RunManifest:
         }
 
 
+def effective_training_config(config: TrainingV2Config) -> TrainingV2Config:
+    """Inspect the exact configuration that a coordinator will use on resume."""
+    if not is_v2_run(config.base_dir):
+        return config.model_copy(deep=True)
+    with RunManifest.open_existing(Path(config.base_dir)) as manifest:
+        persisted = manifest.get_state("config")
+    if not isinstance(persisted, dict):
+        raise ValueError("Run is missing its configuration")
+    for field in ("base_dir", "device", "max_gens", "max_candidate_attempts"):
+        persisted[field] = getattr(config, field)
+    return TrainingV2Config.model_validate(persisted)
+
+
 def training_status(base_dir: str) -> dict[str, Any]:
-    return RunManifest.open_existing(Path(base_dir)).status()
+    with RunManifest.open_existing(Path(base_dir)) as manifest:
+        return manifest.status()
 
 
 def _validation_game(seed: int, game_id: int, fraction: float) -> bool:
@@ -486,25 +688,12 @@ def _validation_game(seed: int, game_id: int, fraction: float) -> bool:
 
 
 def _model_loss(model: ConnectFourNet, batch: tuple[torch.Tensor, ...]) -> torch.Tensor:
-    (
-        pos,
-        policy_target,
-        q_penalty_target,
-        q_no_penalty_target,
-        policy_weight,
-        value_weight,
-    ) = batch
-    policy_logprob, q_penalty_pred, q_no_penalty_pred = model(pos)
-    target_logprob = torch.log(policy_target + model.EPS)
-    policy_each = (policy_target * (target_logprob - policy_logprob)).sum(dim=1)
-    policy_loss = (policy_each * policy_weight).sum() / policy_weight.sum().clamp_min(1)
-    q_penalty_loss = (
-        ((q_penalty_pred - q_penalty_target) ** 2) * value_weight
-    ).sum() / value_weight.sum().clamp_min(1)
-    q_no_penalty_loss = (
-        ((q_no_penalty_pred - q_no_penalty_target) ** 2) * value_weight
-    ).sum() / value_weight.sum().clamp_min(1)
-    return policy_loss + q_penalty_loss + q_no_penalty_loss
+    from c4a0.losses import policy_value_losses
+
+    policy, penalty, value = policy_value_losses(
+        model(batch[0]), batch, model.value_loss_weight
+    )
+    return policy + penalty + value
 
 
 @dataclass(frozen=True)
@@ -652,9 +841,7 @@ class ReplayPool:
                 pos, policy, q_penalty, q_no_penalty = sample.to_numpy()
                 terminal = sample_index == len(game.samples) - 1
                 player_id = (
-                    game.player0_id
-                    if int(sample.ply) % 2 == 0
-                    else game.player1_id
+                    game.player0_id if int(sample.ply) % 2 == 0 else game.player1_id
                 )
                 policy_weight = float(
                     not terminal and player_id == int(shard["champion_attempt"])
@@ -666,9 +853,7 @@ class ReplayPool:
                         torch.from_numpy(q_penalty),
                         torch.from_numpy(q_no_penalty),
                         torch.tensor(policy_weight, dtype=torch.float32),
-                        torch.tensor(
-                            self.config.value_loss_weight, dtype=torch.float32
-                        ),
+                        torch.tensor(1.0, dtype=torch.float32),
                     )
                 )
             pin = device.type == "cuda"
@@ -711,8 +896,9 @@ class ReplayPrefetcher:
         return batch
 
     def invalidate(self) -> None:
-        if self.future is not None:
-            self.future.cancel()
+        if self.future is not None and not self.future.cancel():
+            # Wait for the RNG consumer before snapshotting or changing replay.
+            self.future.result()
         self.future = None
         self.signature = None
 
@@ -790,6 +976,7 @@ def _trainer_process(
         if device.type == "cuda":
             torch.cuda.manual_seed_all(config.run_seed)
         model, payload = _load_checkpoint(champion_path)
+        model.value_loss_weight = config.value_loss_weight
         progress_payload = payload
         model.to(device)
         optimizer = Adam(
@@ -822,6 +1009,7 @@ def _trainer_process(
             if int(resumed.get("champion_attempt", -1)) == champion_attempt:
                 progress_payload = resumed
                 model = resumed_model.to(device)
+                model.value_loss_weight = config.value_loss_weight
                 accepted_count = int(resumed.get("accepted_count", 0))
                 optimizer = Adam(
                     model.parameters(),
@@ -916,6 +1104,7 @@ def _trainer_process(
                     # break-even challenger; retaining a clearly losing model
                     # compounds regressions across every later candidate cycle.
                     model, decision_payload = _load_checkpoint(command["learner_path"])
+                    model.value_loss_weight = config.value_loss_weight
                     model.to(device)
                     optimizer = Adam(
                         model.parameters(),
@@ -1008,6 +1197,7 @@ def _trainer_process(
                 )
                 if validation_losses and current_loss < best_loss:
                     best_loss = current_loss
+                    prefetcher.invalidate()
                     best_payload = _checkpoint_payload(
                         model,
                         optimizer,
@@ -1048,6 +1238,7 @@ def _trainer_process(
                 and sample_budget <= max(batch_size, pool.resume_sample_budget())
             ):
                 if best_payload is None:
+                    prefetcher.invalidate()
                     best_payload = _checkpoint_payload(
                         model,
                         optimizer,
@@ -1070,8 +1261,8 @@ def _trainer_process(
                         "type": "candidate",
                         "path": str(candidate_path),
                         "val_loss": best_loss,
-                        "training_steps": training_steps,
-                        "training_samples": training_samples,
+                        "training_steps": best_payload["training_steps"],
+                        "training_samples": best_payload["training_samples"],
                         "submitted_fresh_games": fresh_games,
                         "candidate_latency_seconds": time.monotonic()
                         - candidate_cycle_started,
@@ -1144,39 +1335,19 @@ class _ActorEvaluator:
                 np.ascontiguousarray(q_no_penalty * self.value_scale),
             )
         model = self.models[int(model_id)]
-        tensor = torch.from_numpy(positions).to(
-            self.device, non_blocking=self.device.type == "cuda"
-        )
-        use_amp = self.device.type == "cuda" and self.precision != "32-true" and (
-            self.precision == "16-mixed" or batch_size >= self.amp_min_batch_size
-        )
-        with (
-            torch.inference_mode(),
-            torch.autocast(
-                device_type=self.device.type,
-                dtype=torch.float16,
-                enabled=use_amp,
-            ),
-        ):
-            policy, q_penalty, q_no_penalty = model(tensor)
-        return (
-            np.ascontiguousarray(policy.float().cpu().numpy()),
-            np.ascontiguousarray(q_penalty.float().cpu().numpy() * self.value_scale),
-            np.ascontiguousarray(
-                q_no_penalty.float().cpu().numpy() * self.value_scale
-            ),
+        return model.infer_numpy(
+            positions,
+            value_scale=self.value_scale,
+            precision=self.precision,
+            amp_min_batch_size=self.amp_min_batch_size,
         )
 
 
 def _splitmix64(values: np.ndarray) -> np.ndarray:
     """Vectorized SplitMix64 output used by the stateless random baseline."""
     values = values + np.uint64(0x9E3779B97F4A7C15)
-    values = (values ^ (values >> np.uint64(30))) * np.uint64(
-        0xBF58476D1CE4E5B9
-    )
-    values = (values ^ (values >> np.uint64(27))) * np.uint64(
-        0x94D049BB133111EB
-    )
+    values = (values ^ (values >> np.uint64(30))) * np.uint64(0xBF58476D1CE4E5B9)
+    values = (values ^ (values >> np.uint64(27))) * np.uint64(0x94D049BB133111EB)
     return values ^ (values >> np.uint64(31))
 
 
@@ -1312,7 +1483,7 @@ def _run_arena(
     options.early_temperature = 0.0
     options.middle_temperature = 0.0
     options.late_temperature = 0.0
-    gate = SprtGate(
+    gate = PairedSprtGate(
         p0=config.arena_p0,
         p1=config.arena_p1,
         alpha=config.arena_alpha,
@@ -1341,15 +1512,11 @@ def _run_arena(
             requests.extend(
                 [
                     c4a0_cpp.GameRequest(
-                        c4a0_cpp.GameMetadata(
-                            game_id, candidate_id, champion_id
-                        ),
+                        c4a0_cpp.GameMetadata(game_id, candidate_id, champion_id),
                         opening,
                     ),
                     c4a0_cpp.GameRequest(
-                        c4a0_cpp.GameMetadata(
-                            game_id + 1, champion_id, candidate_id
-                        ),
+                        c4a0_cpp.GameMetadata(game_id + 1, champion_id, candidate_id),
                         opening,
                     ),
                 ]
@@ -1379,7 +1546,7 @@ def _run_arena(
             cancelled.is_set,
             arena_telemetry,
         )
-        for result in results.results:
+        for result in sorted(results.results, key=lambda game: game.metadata.game_id):
             red_score = float(result.player0_score())
             score = (
                 red_score
@@ -1393,6 +1560,7 @@ def _run_arena(
             else:
                 losses += 1
             gate.update(score)
+        gate_decision = gate.decision()
         path.append(gate.llr)
         if progress is not None:
             progress(
@@ -1406,7 +1574,6 @@ def _run_arena(
                     "pair_batch_size": pair_count,
                 }
             )
-        gate_decision = gate.decision()
         if gate_decision is not None:
             decision = gate_decision
             break
@@ -1417,6 +1584,9 @@ def _run_arena(
     return {
         "decision": decision,
         "reason": "sprt" if gate.crossed_boundary else "max_games_inconclusive",
+        "statistical_model": "paired-multinomial-gsprt-v1",
+        "paired_outcomes": gate.counts.tolist(),
+        "error_rates_calibrated_for_production_openings": False,
         "games": games,
         "wins": wins,
         "draws": draws,
@@ -1481,6 +1651,18 @@ class SprtGate:
         if self.games >= self.maximum_games:
             return "rejected"
         return None
+
+
+def _owned_training_child(parent_pid: int, target, args) -> None:
+    """Linux children cannot keep writing a run after their coordinator dies."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(1, signal.SIGKILL, 0, 0, 0) != 0:  # PR_SET_PDEATHSIG
+        raise OSError(
+            ctypes.get_errno(), "cannot bind training child to coordinator lifetime"
+        )
+    if os.getppid() != parent_pid:
+        return
+    target(*args)
 
 
 def _actor_process(
@@ -1570,18 +1752,14 @@ def _actor_process(
                         int(game.metadata.game_id) for game in chunk_games
                     )
                     path = (
-                        Path(config.base_dir)
-                        / "replay"
-                        / f"{first_game_id:020d}.cbor"
+                        Path(config.base_dir) / "replay" / f"{first_game_id:020d}.cbor"
                     )
                     _atomic_bytes(path, chunk.to_cbor())
                     prepared.append(
                         {
                             "path": str(path),
                             "games": len(chunk_games),
-                            "samples": sum(
-                                len(game.samples) for game in chunk_games
-                            ),
+                            "samples": sum(len(game.samples) for game in chunk_games),
                             "train_samples": sum(
                                 len(game.samples)
                                 for game in chunk_games
@@ -1600,9 +1778,7 @@ def _actor_process(
                         {
                             "type": "shard",
                             **shard,
-                            "champion_attempt": int(
-                                command["champion"]["attempt_n"]
-                            ),
+                            "champion_attempt": int(command["champion"]["attempt_n"]),
                             "batch_final": index == len(prepared) - 1,
                             "batch_games": len(requests),
                             "batch_samples": batch_samples,
@@ -1753,7 +1929,7 @@ def _prune_rejected(
         if int(row["attempt_n"]) in retained:
             continue
         try:
-            Path(row["checkpoint_path"]).unlink()
+            manifest.resolve_artifact(row["checkpoint_path"]).unlink()
         except FileNotFoundError:
             pass
 
@@ -1796,6 +1972,8 @@ def _recover_orphaned_candidates(manifest: RunManifest) -> None:
         interrupted_path = attempts_dir / f"{attempt_n:06d}" / "model.pt"
         interrupted_path.parent.mkdir(parents=True, exist_ok=True)
         os.replace(orphaned_candidate, interrupted_path)
+        _sync_directory(interrupted_path.parent)
+        _sync_directory(manifest.base_dir)
         register(attempt_n, interrupted_path)
 
 
@@ -1806,8 +1984,30 @@ def run_async_training(
     should_stop_after_candidate: Callable[[], bool] | None = None,
     arena_decision_override: Callable[[dict[str, Any]], str] | None = None,
 ) -> dict[str, Any]:
+    config = config.model_copy(
+        update={"base_dir": str(Path(config.base_dir).resolve())}
+    )
+    with training_run_owner(Path(config.base_dir)):
+        with RunManifest.create(Path(config.base_dir), config) as manifest:
+            return _run_async_training_owned(
+                config,
+                manifest,
+                progress_callback,
+                should_cancel,
+                should_stop_after_candidate,
+                arena_decision_override,
+            )
+
+
+def _run_async_training_owned(
+    config: TrainingV2Config,
+    manifest: RunManifest,
+    progress_callback: Callable[[str, dict[str, Any]], None] | None = None,
+    should_cancel: Callable[[], bool] | None = None,
+    should_stop_after_candidate: Callable[[], bool] | None = None,
+    arena_decision_override: Callable[[dict[str, Any]], str] | None = None,
+) -> dict[str, Any]:
     base_dir = Path(config.base_dir)
-    manifest = RunManifest.create(base_dir, config)
     persisted_config = manifest.get_state("config")
     if not isinstance(persisted_config, dict):
         raise RuntimeError("V2 run is missing its effective configuration")
@@ -1836,6 +2036,8 @@ def run_async_training(
         torch.manual_seed(config.run_seed)
         root_path = base_dir / "attempts" / "000000" / "model.pt"
         root = ConnectFourNet(model_config)
+        root.mcts_value_scale = config.mcts_value_scale
+        root.value_loss_weight = config.value_loss_weight
         _atomic_torch_save(root_path, _checkpoint_payload(root, status="accepted"))
         manifest.add_root(root_path)
     _recover_orphaned_candidates(manifest)
@@ -1856,80 +2058,89 @@ def run_async_training(
     trainer_events = context.Queue()
     cancelled = context.Event()
     actor = context.Process(
-        target=_actor_process,
-        args=(config.model_dump(mode="json"), actor_commands, actor_events, cancelled),
+        target=_owned_training_child,
+        args=(
+            os.getpid(),
+            _actor_process,
+            (config.model_dump(mode="json"), actor_commands, actor_events, cancelled),
+        ),
         name="c4a0-self-play",
     )
     trainer = context.Process(
-        target=_trainer_process,
+        target=_owned_training_child,
         args=(
-            config.model_dump(mode="json"),
-            champion["checkpoint_path"],
-            champion["attempt_n"],
-            active_shards,
-            pending is not None,
-            trainer_commands,
-            trainer_events,
-            cancelled,
+            os.getpid(),
+            _trainer_process,
+            (
+                config.model_dump(mode="json"),
+                champion["checkpoint_path"],
+                champion["attempt_n"],
+                active_shards,
+                pending is not None,
+                trainer_commands,
+                trainer_events,
+                cancelled,
+            ),
         ),
         name="c4a0-trainer",
     )
-    actor.start()
-    trainer.start()
-    actor_busy = False
-    arena_waiting = pending is not None
-    pending_deletions: dict[int, str] = {}
-    paused_for_debt = False
-    trainer_budget = 0
-    trainer_fresh_games = 0
-    average_train_samples = 1.0
-    stop_requested = False
-    lifecycle_waiting: set[str] = set()
-    candidate_decisions = 0
-    last_logged_debt: int | None = None
-    writer = SummaryWriter(log_dir=str(base_dir / "tensorboard"))
-
-    def emit(phase: str, payload: dict[str, Any]) -> None:
-        if progress_callback is not None:
-            progress_callback(phase, payload)
-
-    def actor_models():
-        current = manifest.champion()
-        archives = manifest.accepted_models(config.archive_depth)
-        return current, archives
-
-    def queue_generation() -> None:
-        nonlocal actor_busy
-        current, archives = actor_models()
-        actor_commands.put(
-            {
-                "type": "generate",
-                "champion": current,
-                "archives": archives,
-                "first_game_id": int(manifest.get_state("next_game_id") or 1),
-            }
-        )
-        actor_busy = True
-
-    if pending is not None:
-        manifest.set_state("trainer_progress", {"state": "waiting_for_arena"})
-        manifest.set_state(
-            "arena_progress",
-            {"state": "resuming", "attempt": int(pending["attempt_n"])},
-        )
-        trainer_commands.put({"type": "pending"})
-        actor_commands.put(
-            {
-                "type": "arena",
-                "champion": champion,
-                "candidate": pending,
-                "openings": openings,
-            }
-        )
-        actor_busy = True
-    else:
-        queue_generation()
+    writer: SummaryWriter | None = None
     try:
+        actor.start()
+        trainer.start()
+        actor_busy = False
+        arena_waiting = pending is not None
+        pending_deletions: dict[int, str] = {}
+        paused_for_debt = False
+        trainer_budget = 0
+        trainer_fresh_games = 0
+        average_train_samples = 1.0
+        stop_requested = False
+        lifecycle_waiting: set[str] = set()
+        candidate_decisions = 0
+        last_logged_debt: int | None = None
+        writer = SummaryWriter(log_dir=str(base_dir / "tensorboard"))
+
+        def emit(phase: str, payload: dict[str, Any]) -> None:
+            if progress_callback is not None:
+                progress_callback(phase, payload)
+
+        def actor_models():
+            current = manifest.champion()
+            archives = manifest.accepted_models(config.archive_depth)
+            return current, archives
+
+        def queue_generation() -> None:
+            nonlocal actor_busy
+            current, archives = actor_models()
+            actor_commands.put(
+                {
+                    "type": "generate",
+                    "champion": current,
+                    "archives": archives,
+                    "first_game_id": int(manifest.get_state("next_game_id") or 1),
+                }
+            )
+            actor_busy = True
+
+        if pending is not None:
+            manifest.set_state("trainer_progress", {"state": "waiting_for_arena"})
+            manifest.set_state(
+                "arena_progress",
+                {"state": "resuming", "attempt": int(pending["attempt_n"])},
+            )
+            trainer_commands.put({"type": "pending"})
+            actor_commands.put(
+                {
+                    "type": "arena",
+                    "champion": champion,
+                    "candidate": pending,
+                    "openings": openings,
+                }
+            )
+            actor_busy = True
+        else:
+            queue_generation()
         while True:
             if should_cancel is not None and should_cancel():
                 raise TrainingCancelled("asynchronous training cancelled")
@@ -1966,9 +2177,7 @@ def run_async_training(
                             "replay/games", event_status["replay_games"], step
                         )
                         if event.get("batch_final", True):
-                            batch_games = int(
-                                event.get("batch_games", event["games"])
-                            )
+                            batch_games = int(event.get("batch_games", event["games"]))
                             batch_samples = int(
                                 event.get("batch_samples", event["samples"])
                             )
@@ -2047,6 +2256,8 @@ def run_async_training(
                         )
                         attempt_path.parent.mkdir(parents=True, exist_ok=True)
                         os.replace(event["path"], attempt_path)
+                        _sync_directory(attempt_path.parent)
+                        _sync_directory(base_dir)
                         champion = manifest.champion()
                         if stop_requested:
                             manifest.add_interrupted_attempt(
@@ -2116,9 +2327,7 @@ def run_async_training(
                             "neural_queue_depth": int(
                                 event.get("neural_queue_depth", 0)
                             ),
-                            "mcts_queue_depth": int(
-                                event.get("mcts_queue_depth", 0)
-                            ),
+                            "mcts_queue_depth": int(event.get("mcts_queue_depth", 0)),
                         }
                         manifest.set_state("arena_progress", live)
                         emit("arena_progress", {"component": "arena", **live})
@@ -2197,7 +2406,11 @@ def run_async_training(
                             incumbent_path = (
                                 None
                                 if incumbent_row is None
-                                else str(incumbent_row["checkpoint_path"])
+                                else str(
+                                    manifest.resolve_artifact(
+                                        incumbent_row["checkpoint_path"]
+                                    )
+                                )
                             )
                             if score >= config.learner_incumbent_min_score and (
                                 incumbent_score is None
@@ -2327,9 +2540,7 @@ def run_async_training(
                                 ),
                                 "validation_loss": float(event["val_loss"]),
                                 "champion_attempt": int(event["champion_attempt"]),
-                                "training_queue_positions": int(
-                                    event["sample_budget"]
-                                ),
+                                "training_queue_positions": int(event["sample_budget"]),
                                 "fresh_game_queue": int(event["fresh_games"]),
                             },
                         )
@@ -2421,24 +2632,38 @@ def run_async_training(
         cancelled.set()
         actor_commands.put({"type": "stop"})
         trainer_commands.put({"type": "stop"})
-        actor.join(timeout=5)
-        trainer.join(timeout=5)
-        if actor.is_alive():
-            actor.terminate()
-        if trainer.is_alive():
-            trainer.terminate()
-        actor.join(timeout=2)
-        trainer.join(timeout=2)
+        deadline = time.monotonic() + 3
+        children = [child for child in (actor, trainer) if child.pid is not None]
+        for child in children:
+            child.join(timeout=max(0, deadline - time.monotonic()))
+        for child in children:
+            if child.is_alive():
+                child.terminate()
+        deadline = time.monotonic() + 1
+        for child in children:
+            child.join(timeout=max(0, deadline - time.monotonic()))
+            if child.is_alive():
+                child.kill()
+        for child in children:
+            child.join(timeout=1)
+            if child.is_alive():
+                raise RuntimeError(f"Training child did not exit: {child.name}")
         orphaned_candidate = base_dir / ".candidate.pt"
         if orphaned_candidate.is_file() and manifest.pending_attempt() is None:
             attempt_n = manifest.next_attempt()
             interrupted_path = base_dir / "attempts" / f"{attempt_n:06d}" / "model.pt"
             interrupted_path.parent.mkdir(parents=True, exist_ok=True)
             os.replace(orphaned_candidate, interrupted_path)
+            _sync_directory(interrupted_path.parent)
+            _sync_directory(base_dir)
             manifest.add_interrupted_attempt(
                 attempt_n,
                 int(manifest.champion()["attempt_n"]),
                 interrupted_path,
             )
-        writer.flush()
-        writer.close()
+        if writer is not None:
+            writer.flush()
+            writer.close()
+        for channel in (actor_commands, trainer_commands, actor_events, trainer_events):
+            channel.cancel_join_thread()
+            channel.close()

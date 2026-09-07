@@ -15,7 +15,7 @@ from pydantic import BaseModel
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import EarlyStopping
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, RandomSampler
 
 from c4a0.nn import ConnectFourNet, ModelConfig
 from c4a0.training_common import (
@@ -351,7 +351,7 @@ def train_single_gen(
         enable_progress_bar=enable_progress_bar,
         enable_model_summary=enable_model_summary,
     )
-    trainer.gen_n = gen_n  # type: ignore
+    model.schedule_generation = gen_n
     model.train()  # Switch batch normalization to train mode for training bn params
     trainer.fit(model, data_module)
     if should_cancel is not None and should_cancel():
@@ -477,6 +477,29 @@ SampleTensor = NewType(
 )
 
 
+class _TrainingBatchSampler:
+    """Keep all samples while merging a final singleton into the preceding batch."""
+
+    def __init__(self, length: int, batch_size: int):
+        if batch_size < 2 or length < 2:
+            raise ValueError("Training requires at least two samples per batch")
+        self.length, self.batch_size = length, batch_size
+
+    def __iter__(self):
+        indices = list(RandomSampler(range(self.length)))
+        batches = [
+            indices[start : start + self.batch_size]
+            for start in range(0, self.length, self.batch_size)
+        ]
+        if len(batches) > 1 and len(batches[-1]) == 1:
+            batches[-2].extend(batches.pop())
+        yield from batches
+
+    def __len__(self):
+        count = (self.length + self.batch_size - 1) // self.batch_size
+        return count - int(count > 1 and self.length % self.batch_size == 1)
+
+
 class SampleDataModule(pl.LightningDataModule):
     def __init__(
         self,
@@ -486,8 +509,8 @@ class SampleDataModule(pl.LightningDataModule):
     ):
         super().__init__()
         self.batch_size = batch_size
-        training_data += [s.flip_h() for s in training_data]
-        validation_data += [s.flip_h() for s in validation_data]
+        training_data = [*training_data, *(s.flip_h() for s in training_data)]
+        validation_data = [*validation_data, *(s.flip_h() for s in validation_data)]
         self.training_data = [self.sample_to_tensor(s) for s in training_data]
         self.validation_data = [self.sample_to_tensor(s) for s in validation_data]
 
@@ -507,8 +530,9 @@ class SampleDataModule(pl.LightningDataModule):
     def train_dataloader(self):
         return DataLoader(
             self.training_data,  # type: ignore
-            batch_size=self.batch_size,
-            shuffle=True,
+            batch_sampler=_TrainingBatchSampler(
+                len(self.training_data), self.batch_size
+            ),
         )
 
     def val_dataloader(self):

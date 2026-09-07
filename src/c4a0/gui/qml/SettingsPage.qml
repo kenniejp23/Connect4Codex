@@ -22,6 +22,11 @@ Item {
                     SectionTitle { width: parent.width; title: "Appearance"; subtitle: "The technical dark theme is optimized for long training and analysis sessions." }
                     RowLayout {
                         width: parent.width
+                        Label { Layout.fillWidth: true; text: "Interactive inference (CPU avoids training contention)"; wrapMode: Text.Wrap }
+                        ComboBox { model: App.cudaAvailable ? ["cpu", "cuda"] : ["cpu"]; currentIndex: Math.max(0, find(App.interactiveDevice)); onActivated: App.setInteractiveDevice(currentText) }
+                    }
+                    RowLayout {
+                        width: parent.width
                         Text { Layout.fillWidth: true; text: "Color theme"; color: ApplicationWindow.window.textColor; font.pixelSize: 13 }
                         ComboBox { model: ["Dark", "Light"]; currentIndex: App.theme === "light" ? 1 : 0; onActivated: App.setTheme(currentIndex === 1 ? "light" : "dark") }
                     }
@@ -47,9 +52,9 @@ Item {
                     LabeledField { id: settingsSolver; width: parent.width; label: "Solver executable"; text: App.solverPath }
                     LabeledField { id: settingsBook; width: parent.width; label: "Opening book"; text: App.bookPath }
                     LabeledField { id: settingsCache; width: parent.width; label: "Solutions cache"; text: App.solutionsPath }
-                    Button {
+                    PrimaryButton {
                         text: "Save paths"
-                        highlighted: true
+
                         onClicked: {
                             App.setTrainingDir(settingsTraining.text)
                             App.setSolverPaths(settingsSolver.text, settingsBook.text, settingsCache.text)

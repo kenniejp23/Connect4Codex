@@ -116,9 +116,7 @@ def test_arena_openings_are_unique_mirrored_and_nonempty(tmp_path):
 
 
 def test_league_allocation_is_balanced_and_bootstraps_without_archive(tmp_path):
-    config = _tiny_config(
-        tmp_path, self_play_shard_games=40, self_play_batch_games=40
-    )
+    config = _tiny_config(tmp_path, self_play_shard_games=40, self_play_batch_games=40)
     requests = _league_requests(config, 7, [], 1)
     assert len(requests) == 40
     assert all(
@@ -149,9 +147,7 @@ def test_league_allocation_is_balanced_and_bootstraps_without_archive(tmp_path):
 
 
 def test_league_balances_champion_colour_within_each_category(tmp_path):
-    config = _tiny_config(
-        tmp_path, self_play_shard_games=40, self_play_batch_games=40
-    )
+    config = _tiny_config(tmp_path, self_play_shard_games=40, self_play_batch_games=40)
     requests = _league_requests(config, 7, [5, 4], 100)
     colours: dict[str, list[bool]] = {}
     for request in requests:
@@ -197,9 +193,7 @@ def test_actor_value_scale_can_disable_uncalibrated_search_values():
 
 
 def test_random_league_uses_one_vectorizable_model_id(tmp_path):
-    config = _tiny_config(
-        tmp_path, self_play_shard_games=80, self_play_batch_games=80
-    )
+    config = _tiny_config(tmp_path, self_play_shard_games=80, self_play_batch_games=80)
     requests = _league_requests(config, 7, [6], 100)
     random_ids = []
     for request in requests:
@@ -407,7 +401,9 @@ def test_replay_partition_sampling_recency_and_head_weights(tmp_path):
     batch = pool.batch(512, torch.device("cpu"), False)
     policy_weights = set(batch[4].tolist())
     assert policy_weights == {0.0, 1.0}
-    assert torch.all(batch[5] == config.value_loss_weight)
+    assert torch.all(
+        batch[5] == 1.0
+    )  # Eligibility is separate from the head coefficient.
     assert len(pool.cache) == 1
 
     fake_shards = [

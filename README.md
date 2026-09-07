@@ -20,7 +20,8 @@ mise run gui
 
 [`mise.toml`](mise.toml) pins Python, uv, CMake, and Ninja. The compiler is supplied by the host.
 The build downloads pinned native dependencies and installs the editable Python package.
-The checked-in CI targets Linux.
+The checked-in CI targets Ubuntu 24.04. See [Linux installation](docs/linux-release.md) for
+release artifacts and [release qualification](docs/release-readiness.md) for the acceptance gates.
 
 ## Train and inspect a run
 
@@ -31,7 +32,9 @@ uv run tensorboard --logdir training-v2/tensorboard --port 6006
 ```
 
 `train` creates or resumes a V2 run. Separate actor and learner processes generate replay data and
-train candidates; a paired SPRT arena evaluates candidates against the accepted champion.
+train candidates; a paired multinomial GSPRT arena evaluates candidates against the accepted champion.
+Synthetic calibration tests cover draws and paired outcomes; they do not establish error rates
+for production opening distributions.
 `--max-gens` sets the run-wide accepted-promotion limit, excluding the initial champion. Use
 `--max-candidate-attempts` to bound candidate decisions, including rejections.
 
@@ -39,6 +42,16 @@ The opponent mix uses the champion, accepted historical models, and random/unifo
 The default `--mcts-value-scale 0.0` and `--value-loss-weight 0.0` disable neural value contributions
 in V2 search and value losses in training, respectively. Policy learning and terminal game outcomes
 remain active. The V2 trainer does not call the external solver.
+
+Use `c4a0 training-config --base-dir training-v2` to inspect saved experiment settings before
+resuming. A second trainer for the same run is rejected while readers remain available. Run
+artifacts are stored with portable paths. Inference settings travel with saved models, so arena
+and ordinary play use the same value-head policy. Export compact weights with:
+
+```sh
+uv run c4a0 export-model champion.pt --base-dir training-v2
+uv run c4a0 minimax-test --model-path champion.pt --max-depth 3
+```
 
 The synchronous Lightning workflow remains available as `train-legacy`, with its default data
 root at `training/`. See the [development guide](docs/development.md) for configuration and artifacts.
@@ -60,7 +73,8 @@ it requires an existing model. `random` and `uniform` supply MCTS evaluators and
 
 The desktop UI includes play and live search analysis, V2 training controls, model inspection,
 tournaments, legacy-data solver scoring and sweeps, and developer validation. Preferences and
-paths are stored in Qt user settings.
+paths are stored in Qt user settings. Interactive inference defaults to CPU to avoid competing
+with training; Settings provides an explicit CUDA override for new games.
 
 ## Evaluate
 

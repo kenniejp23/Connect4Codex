@@ -6,6 +6,40 @@ Item {
     id: page
     objectName: "trainingPage"
     property bool advanced: false
+    property bool resuming: false
+    property var fullConfig: ({})
+    property string configurationError: ""
+    property string submittedConfiguration: ""
+    Component.onCompleted: loadRun()
+
+    function showConfig(config) {
+        fullConfig = config
+        device.currentIndex = Math.max(0, device.find(config.device))
+        selfPlayGames.value = config.replay_warmup_games
+        trainingMcts.value = config.n_mcts_iterations
+        selfPlayBatch.value = config.inference_batch_size
+        trainBatch.value = config.training_batch_size
+        residualBlocks.value = config.n_residual_blocks
+        filters.value = config.conv_filter_size
+        policyLayers.value = config.n_policy_layers
+        valueLayers.value = config.n_value_layers
+        exploration.text = String(config.c_exploration)
+        plyPenalty.text = String(config.c_ply_penalty)
+        learningSchedule.text = config.lr_schedule.join(", ")
+        l2.text = String(config.l2_reg)
+        if (config.max_gens !== null) generations.value = config.max_gens
+        var immutable = [selfPlayGames, trainingMcts, selfPlayBatch, trainBatch, residualBlocks,
+                         filters, policyLayers, valueLayers, exploration, plyPenalty, learningSchedule, l2]
+        immutable.forEach(function(control) { control.enabled = !page.resuming })
+    }
+
+    function loadRun() {
+        var info = JSON.parse(App.trainingConfiguration(trainingDirectory.text))
+        configurationError = info.error || ""
+        if (info.error) return
+        resuming = info.resume
+        showConfig(info.config)
+    }
     property bool compact: width < 1000
 
     function scheduleValues() {
@@ -18,7 +52,7 @@ Item {
             shardGames * 2,
             Math.floor(selfPlayGames.value / shardGames) * shardGames
         )
-        var config = {
+        var edits = {
             base_dir: trainingDirectory.text,
             device: device.currentText,
             replay_warmup_games: selfPlayGames.value,
@@ -41,31 +75,22 @@ Item {
             l2_reg: Number(l2.text),
             max_gens: generations.value,
             arena_min_games: 40,
-            arena_max_games: 200,
+            arena_max_games: 800,
             root_dirichlet_epsilon: 0.25,
             root_dirichlet_alpha: 0.30,
             temperature_cutoff_ply: 8
         }
+        var config = Object.assign({}, fullConfig, edits)
+        if (resuming) config = Object.assign({}, fullConfig, {
+            base_dir: trainingDirectory.text, device: device.currentText, max_gens: generations.value
+        })
+        submittedConfiguration = JSON.stringify(config, null, 2)
         Jobs.submit("training", JSON.stringify(config), "Train " + trainingDirectory.text)
     }
 
     function applyPreset(name) {
-        if (name === "CPU") {
-            device.currentIndex = device.find("cpu")
-            selfPlayGames.value = 256; trainingMcts.value = 100
-            selfPlayBatch.value = 64; trainBatch.value = 128
-            filters.value = 16; policyLayers.value = 2; valueLayers.value = 1
-            generations.value = 3
-        } else if (name === "Balanced") {
-            selfPlayGames.value = 1024; trainingMcts.value = 600
-            selfPlayBatch.value = 128; trainBatch.value = 256
-            generations.value = 5
-        } else {
-            selfPlayGames.value = 2048; trainingMcts.value = 1400
-            selfPlayBatch.value = 128; trainBatch.value = 512
-            filters.value = 32; policyLayers.value = 4; valueLayers.value = 2
-            generations.value = 10
-        }
+        if (resuming) return
+        showConfig(JSON.parse(App.trainingPreset(name)))
     }
 
     RowLayout {
@@ -94,12 +119,14 @@ Item {
                         subtitle: "Run asynchronous neural self-play, replay training, and champion gating."
                     }
 
+                    Label { width: parent.width; wrapMode: Text.Wrap; text: page.configurationError || (page.resuming ? "Resuming saved experiment. Experiment settings are locked. Choose an empty directory to change them. Champion limit is run-wide." : "New experiment"); color: ApplicationWindow.window.mutedTextColor }
+                    TextArea { width: parent.width; visible: page.submittedConfiguration.length > 0; text: page.submittedConfiguration; readOnly: true; wrapMode: TextEdit.Wrap; Accessible.name: "Submitted training configuration" }
                     Text { text: "PRESET"; color: ApplicationWindow.window.faintTextColor; font.pixelSize: 10; font.weight: Font.DemiBold; font.letterSpacing: 1 }
                     Row {
                         spacing: 8
-                        Button { text: "CPU"; onClicked: page.applyPreset("CPU") }
-                        Button { text: "Balanced"; onClicked: page.applyPreset("Balanced") }
-                        Button { text: "GPU"; highlighted: true; onClicked: page.applyPreset("GPU") }
+                        Button { enabled: !page.resuming; text: "CPU"; onClicked: page.applyPreset("CPU") }
+                        Button { enabled: !page.resuming; text: "Balanced"; onClicked: page.applyPreset("Balanced") }
+                        PrimaryButton { enabled: !page.resuming && App.cudaAvailable; text: "GPU"; onClicked: page.applyPreset("GPU") }
                     }
 
                     GridLayout {
@@ -107,7 +134,7 @@ Item {
                         columns: 2
                         columnSpacing: 14
                         rowSpacing: 12
-                        LabeledField { id: trainingDirectory; Layout.fillWidth: true; label: "Training directory"; text: App.trainingDir; onTextChanged: if (!activeFocus) App.setTrainingDir(text) }
+                        LabeledField { id: trainingDirectory; Layout.fillWidth: true; label: "Training directory"; text: App.trainingDir; onEditingFinished: { App.setTrainingDir(text); page.loadRun() } }
                         Column {
                             Layout.fillWidth: true
                             spacing: 6
@@ -176,10 +203,11 @@ Item {
 
                     }
 
-                    Row {
+                    RowLayout {
+                        width: parent.width
                         spacing: 10
-                        Button { text: Jobs.active ? "Queue training" : "Start training"; highlighted: true; onClicked: page.submitTraining() }
-                        Text { anchors.verticalCenter: parent.verticalCenter; text: Jobs.active ? "This run will start after " + Jobs.currentTitle : "Replay shards and candidates are saved atomically"; color: ApplicationWindow.window.mutedTextColor; font.pixelSize: 11 }
+                        PrimaryButton { text: Jobs.active ? "Queue training" : "Start training"; onClicked: page.submitTraining() }
+                        Text { Layout.fillWidth: true; wrapMode: Text.WordWrap; text: Jobs.active ? "This run will start after " + Jobs.currentTitle : "Replay shards and candidates are saved atomically"; color: ApplicationWindow.window.mutedTextColor; font.pixelSize: 11 }
                     }
                 }
             }
@@ -258,21 +286,30 @@ Item {
                     Layout.fillHeight: true
                     ScrollBar.horizontal.policy: ScrollBar.AsNeeded
                     ScrollBar.vertical.policy: ScrollBar.AsNeeded
-                    TextArea {
+                    ListView {
                         id: trainingLog
                         objectName: "trainingLog"
-                        property real viewportWidth: Math.max(0, trainingLog.ScrollView.view ? trainingLog.ScrollView.view.width : 0)
-                        width: Jobs.logs.length ? Math.max(viewportWidth, contentWidth) : viewportWidth
-                        height: Math.max(implicitHeight, trainingLog.ScrollView.view ? trainingLog.ScrollView.view.height : 0)
-                        text: Jobs.logs.length ? Jobs.logs : "Live phases, metrics, and worker output will appear here."
-                        color: ApplicationWindow.window.mutedTextColor
-                        font.family: "monospace"
-                        font.pixelSize: 10
-                        readOnly: true
-                        selectByMouse: true
-                        wrapMode: TextEdit.NoWrap
-                        onTextChanged: cursorPosition = length
-                        background: Rectangle { color: ApplicationWindow.window.inputColor; radius: 9 }
+                        clip: true
+                        model: Jobs.logModel
+                        onCountChanged: if (count > 0) positionViewAtEnd()
+                        delegate: TextEdit {
+                            required property string line
+                            width: trainingLog.width
+                            text: line
+                            color: ApplicationWindow.window.mutedTextColor
+                            font.family: "monospace"
+                            font.pixelSize: 11
+                            readOnly: true
+                            selectByMouse: true
+                            wrapMode: TextEdit.WrapAnywhere
+                        }
+                        Label {
+                            width: parent.width
+                            visible: trainingLog.count === 0
+                            text: "Live phases, metrics, and worker output will appear here."
+                            wrapMode: Text.Wrap
+                            color: ApplicationWindow.window.mutedTextColor
+                        }
                     }
                 }
                 Text { visible: Jobs.result.length > 0; text: Jobs.result; color: ApplicationWindow.window.textColor; font.family: "monospace"; font.pixelSize: 10; wrapMode: Text.WrapAnywhere; Layout.fillWidth: true }

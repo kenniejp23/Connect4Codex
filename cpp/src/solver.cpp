@@ -14,8 +14,10 @@
 #include <array>
 #include <cerrno>
 #include <charconv>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <iterator>
@@ -26,6 +28,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -252,6 +255,28 @@ class SpawnFileActions {
   bool initialized_{};
 };
 
+using SolverDeadline = std::chrono::steady_clock::time_point;
+
+SolverDeadline solver_deadline() {
+  double seconds = 60.0;
+  if (const char* setting = std::getenv("C4A0_SOLVER_TIMEOUT_SECONDS")) {
+    char* end = nullptr;
+    seconds = std::strtod(setting, &end);
+    if (end == setting || *end != '\0' || !std::isfinite(seconds) || seconds <= 0 ||
+        seconds > 86400) {
+      throw std::invalid_argument("C4A0_SOLVER_TIMEOUT_SECONDS must be in (0, 86400]");
+    }
+  }
+  return std::chrono::steady_clock::now() +
+         std::chrono::milliseconds(static_cast<long long>(seconds * 1000));
+}
+
+void check_solver_deadline(SolverDeadline deadline) {
+  if (std::chrono::steady_clock::now() >= deadline) {
+    throw std::runtime_error("solver subprocess exceeded its deadline");
+  }
+}
+
 class ChildProcess {
  public:
   explicit ChildProcess(pid_t process) : process_(process) {}
@@ -267,12 +292,16 @@ class ChildProcess {
   ChildProcess(const ChildProcess&) = delete;
   ChildProcess& operator=(const ChildProcess&) = delete;
 
-  [[nodiscard]] int wait() {
+  [[nodiscard]] int wait(SolverDeadline deadline) {
     int status = 0;
     pid_t result = 0;
     do {
-      result = ::waitpid(process_, &status, 0);
-    } while (result < 0 && errno == EINTR);
+      check_solver_deadline(deadline);
+      result = ::waitpid(process_, &status, WNOHANG);
+      if (result == 0) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+      }
+    } while (result == 0 || (result < 0 && errno == EINTR));
     if (result < 0) {
       throw_system_error("failed to wait for solver subprocess", errno);
     }
@@ -335,14 +364,21 @@ class ScopedSigpipeBlock {
 };
 
 [[nodiscard]] std::optional<std::string> write_all(int descriptor,
-                                                   std::string_view input) {
+                                                   std::string_view input,
+                                                   SolverDeadline deadline) {
   ScopedSigpipeBlock signal_block;
   std::size_t offset = 0;
   while (offset < input.size()) {
+    check_solver_deadline(deadline);
     const ssize_t written =
         ::write(descriptor, input.data() + offset, input.size() - offset);
     if (written > 0) {
       offset += static_cast<std::size_t>(written);
+      continue;
+    }
+    if (written < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+      pollfd writable{descriptor, POLLOUT, 0};
+      ::poll(&writable, 1, 50);
       continue;
     }
     if (written < 0 && errno == EINTR) {
@@ -396,7 +432,8 @@ struct CapturedOutput {
 };
 
 [[nodiscard]] CapturedOutput read_process_output(FileDescriptor standard_output,
-                                                 FileDescriptor standard_error) {
+                                                 FileDescriptor standard_error,
+                                                 SolverDeadline deadline) {
   set_nonblocking(standard_output.get());
   set_nonblocking(standard_error.get());
 
@@ -411,7 +448,8 @@ struct CapturedOutput {
 
     int result = 0;
     do {
-      result = ::poll(descriptors.data(), descriptors.size(), -1);
+      check_solver_deadline(deadline);
+      result = ::poll(descriptors.data(), descriptors.size(), 50);
     } while (result < 0 && errno == EINTR);
     if (result < 0) {
       throw_system_error("failed to poll solver output", errno);
@@ -576,6 +614,7 @@ struct CapturedOutput {
     input.push_back('\n');
   }
 
+  const auto deadline = solver_deadline();
   Pipe child_input = make_pipe();
   Pipe child_output = make_pipe();
   Pipe child_error = make_pipe();
@@ -611,12 +650,13 @@ struct CapturedOutput {
   child_output.write.reset();
   child_error.write.reset();
 
-  const auto write_error = write_all(child_input.write.get(), input);
+  set_nonblocking(child_input.write.get());
+  const auto write_error = write_all(child_input.write.get(), input, deadline);
   child_input.write.reset();
 
-  CapturedOutput output =
-      read_process_output(std::move(child_output.read), std::move(child_error.read));
-  const int status = child.wait();
+  CapturedOutput output = read_process_output(std::move(child_output.read),
+                                              std::move(child_error.read), deadline);
+  const int status = child.wait(deadline);
   if (write_error.has_value()) {
     throw std::runtime_error(*write_error + describe_stderr(output.standard_error));
   }
