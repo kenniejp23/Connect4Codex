@@ -20,7 +20,9 @@ jobs:
           version: 2026.1.6
           install: true
       - name: Install Qt runtime dependencies
-        run: sudo apt-get update && sudo apt-get install -y libegl1 libopengl0 libxkbcommon-x11-0 libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 libx11-xcb1
+        run: |
+          sudo apt-get update
+          xargs -r -a scripts/linux-runtime-packages.txt sudo apt-get install -y
       - name: Verify version tag
         env:
           RELEASE_TAG: ${{ inputs.tag }}
@@ -32,7 +34,7 @@ jobs:
       - name: Build distributable artifacts
         run: |
           mise exec -- uv build --out-dir dist
-          cp constraints/linux-py311.txt scripts/install-linux.sh docs/linux-release.md docs/release-readiness.md dist/
+          cp constraints/linux-py311.txt scripts/linux-runtime-packages.txt scripts/install-linux.sh docs/linux-release.md docs/release-readiness.md dist/
           cd dist
           sha256sum *.whl *.tar.gz *.txt *.sh *.md > SHA256SUMS
       - uses: actions/upload-artifact@v4

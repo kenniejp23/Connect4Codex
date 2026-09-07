@@ -4,11 +4,15 @@ Target: Linux x86-64, Ubuntu 24.04, Python 3.11. A published release requires th
 qualification gates in [release-readiness.md](release-readiness.md); a release draft
 or passing unit tests is not release approval.
 
-Download the wheel, `linux-py311.txt`, `install-linux.sh`, and `SHA256SUMS` from the
-same GitHub Release. Verify the downloaded files with `sha256sum --ignore-missing -c SHA256SUMS`.
-Install Python 3.11 with its venv module and the Ubuntu packages `libegl1`, `libopengl0`,
-`libxkbcommon-x11-0`, `libxcb-cursor0`, `libxcb-icccm4`, `libxcb-keysyms1`,
-and `libx11-xcb1` before running the installer.
+Download the wheel, `linux-py311.txt`, `linux-runtime-packages.txt`, `install-linux.sh`,
+and `SHA256SUMS` from the same GitHub Release. Verify downloaded files with
+`sha256sum --ignore-missing -c SHA256SUMS`. Install Python 3.11 with its venv module,
+then install the shared Ubuntu runtime list used by CI:
+
+```sh
+sudo apt-get update
+xargs -r -a linux-runtime-packages.txt sudo apt-get install -y
+```
 
 ```sh
 bash install-linux.sh cpu /path/to/c4a0.whl /path/to/linux-py311.txt
